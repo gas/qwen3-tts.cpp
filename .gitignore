@@ -49,3 +49,5 @@ debug_*.bin
 reference/decoder_debug/
 reference/debug/
 ggml/
+hipThreads repo examples
+hipThreads_README.md
