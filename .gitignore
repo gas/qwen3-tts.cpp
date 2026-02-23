@@ -48,7 +48,7 @@ Thumbs.db
 debug_*.bin
 reference/decoder_debug/
 reference/debug/
-ggml/
+# ggml/
 hipThreads repo exmples
 hipThreads_README.md
 hipThreads repo examples

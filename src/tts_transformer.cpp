@@ -1531,6 +1531,22 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_graph(int32_t n_prev_codes)
     return gf;
 }
 
+static void cpu_autoregressive_sampler(struct ggml_tensor * dst, const struct ggml_tensor * a, const struct ggml_tensor * b, const struct ggml_tensor * c, int ith, int nth, void * userdata) {
+    if (ith != 0) return;
+    const float * logits = (const float *) a->data;
+    int32_t * out_token = (int32_t *) dst->data;
+    int vocab_size = a->ne[0];
+    float max_val = -1e9f;
+    int32_t max_idx = 0;
+    for(int i = 0; i < vocab_size; i++) {
+        if(logits[i] > max_val) {
+            max_val = logits[i];
+            max_idx = i;
+        }
+    }
+    *out_token = max_idx;
+}
+
 struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph() {
     const auto & cfg = model_.config;
     const int n_head = cfg.n_attention_heads;
@@ -1669,6 +1685,15 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph() {
     ggml_set_output(logits);
     
     ggml_build_forward_expand(gf, logits);
+
+     // GPU Autoregressive Sampler node
+     struct ggml_tensor * sampled_token = ggml_map_custom3(ctx0, logits, nullptr, nullptr, cpu_autoregressive_sampler, 1, nullptr);
+     sampled_token->type = GGML_TYPE_I32;
+     ggml_set_name(sampled_token, "sampled_token");
+     ggml_set_output(sampled_token);
+     ggml_build_forward_expand(gf, sampled_token);
+
+    // El muestreo CPU se hará externamente ahora
     
     ggml_free(ctx0);
     
@@ -1822,6 +1847,15 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(int32_t n_past, 
      ggml_set_output(logits);
      
      ggml_build_forward_expand(gf, logits);
+
+     // GPU Autoregressive Sampler node
+     struct ggml_tensor * sampled_token = ggml_map_custom3(ctx0, logits, nullptr, nullptr, cpu_autoregressive_sampler, 1, nullptr);
+     sampled_token->type = GGML_TYPE_I32;
+     ggml_set_name(sampled_token, "sampled_token");
+     ggml_set_output(sampled_token);
+     ggml_build_forward_expand(gf, sampled_token);
+
+     // El muestreo CPU se hará externamente ahora
     
     ggml_free(ctx0);
     
@@ -2413,6 +2447,12 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden, int32_t 
 #ifdef QWEN3_TTS_TIMING
         t0 = clk::now();
 #endif
+        // Logits manejado auto
+        struct ggml_tensor * sampled_out_pre = ggml_graph_get_tensor(gf, "sampled_token");
+        if (sampled_out_pre && state_.backend) {
+            ggml_backend_sched_set_tensor_backend(state_.sched, sampled_out_pre, state_.backend);
+        }
+
         if (!ggml_backend_sched_alloc_graph(state_.sched, gf)) {
             error_msg_ = "Failed to allocate code predictor prefill graph";
             return false;
@@ -2458,9 +2498,9 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden, int32_t 
         if (timing_) timing_->t_code_pred_compute_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
 #endif
         
-        struct ggml_tensor * logits = ggml_graph_get_tensor(gf, "logits");
-        if (!logits) {
-            error_msg_ = "Failed to find logits tensor in prefill";
+        struct ggml_tensor * sampled_out = ggml_graph_get_tensor(gf, "sampled_token");
+        if (!sampled_out) {
+            error_msg_ = "Failed to find sampled tensor in prefill";
             ggml_backend_sched_reset(state_.sched);
             return false;
         }
@@ -2468,10 +2508,9 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden, int32_t 
 #ifdef QWEN3_TTS_TIMING
         t0 = clk::now();
 #endif
-        ggml_backend_tensor_get(logits, logits_data.data(), 0, 
-                                 cfg.code_pred_vocab_size * sizeof(float));
-        
-        output[0] = sample_or_argmax(logits_data.data(), cfg.code_pred_vocab_size);
+        int32_t selected_token = 0;
+        ggml_backend_tensor_get(sampled_out, &selected_token, 0, sizeof(int32_t));
+        output[0] = selected_token;
         
         ggml_backend_sched_reset(state_.sched);
 #ifdef QWEN3_TTS_TIMING
@@ -2500,6 +2539,12 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden, int32_t 
 #ifdef QWEN3_TTS_TIMING
         t0 = clk::now();
 #endif
+        // Logits auto
+        struct ggml_tensor * sampled_out_step = ggml_graph_get_tensor(gf, "sampled_token");
+        if (sampled_out_step && state_.backend) {
+            ggml_backend_sched_set_tensor_backend(state_.sched, sampled_out_step, state_.backend);
+        }
+
         if (!ggml_backend_sched_alloc_graph(state_.sched, gf)) {
             error_msg_ = "Failed to allocate code predictor step graph";
             return false;
@@ -2546,9 +2591,9 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden, int32_t 
         if (timing_) timing_->t_code_pred_compute_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
 #endif
         
-        struct ggml_tensor * logits = ggml_graph_get_tensor(gf, "logits");
-        if (!logits) {
-            error_msg_ = "Failed to find logits tensor";
+        struct ggml_tensor * sampled_out = ggml_graph_get_tensor(gf, "sampled_token");
+        if (!sampled_out) {
+            error_msg_ = "Failed to find sampled tensor step";
             ggml_backend_sched_reset(state_.sched);
             return false;
         }
@@ -2556,10 +2601,9 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden, int32_t 
 #ifdef QWEN3_TTS_TIMING
         t0 = clk::now();
 #endif
-        ggml_backend_tensor_get(logits, logits_data.data(), 0, 
-                                 cfg.code_pred_vocab_size * sizeof(float));
-        
-        output[step] = sample_or_argmax(logits_data.data(), cfg.code_pred_vocab_size);
+        int32_t selected_token = 0;
+        ggml_backend_tensor_get(sampled_out, &selected_token, 0, sizeof(int32_t));
+        output[step] = selected_token;
         
         ggml_backend_sched_reset(state_.sched);
 #ifdef QWEN3_TTS_TIMING

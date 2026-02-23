@@ -28,7 +28,6 @@ endif()
 
 # Find threads
 find_package(Threads REQUIRED)
-find_package(hipthreads REQUIRED)
 find_package(rocprim REQUIRED CONFIG)
 find_package(rocthrust REQUIRED CONFIG)
 
@@ -131,7 +130,6 @@ target_link_libraries(audio_tokenizer_decoder PUBLIC
     ggml-base
     ggml-cpu
     Threads::Threads
-    hipthreads::hipthreads
 )
 
 # Qwen3 TTS library (full pipeline)
@@ -167,7 +165,6 @@ set_target_properties(qwen3-tts-cli PROPERTIES
 )
 target_link_libraries(qwen3-tts-cli PRIVATE
     qwen3_tts
-    hipthreads::hipthreads
 )
 
 # Test executable for tokenizer
@@ -210,7 +207,6 @@ target_link_libraries(test_decoder PRIVATE
     audio_tokenizer_decoder
     Threads::Threads
     roc::rocthrust
-    hipthreads::hipthreads
 )
 
 # Install targets

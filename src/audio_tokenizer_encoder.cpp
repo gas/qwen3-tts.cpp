@@ -6,6 +6,7 @@
 #include <cstring>
 #include <algorithm>
 #include <numeric>
+#include <chrono>
 
 #define QWEN3_TTS_MAX_NODES 16384
 
@@ -94,13 +95,73 @@ static void compute_mel_filterbank_slaney(float * filterbank, int n_mels, int n_
 }
 
 static void compute_dft(const float * input, float * real, float * imag, int n) {
-    for (int k = 0; k < n; ++k) {
-        real[k] = 0.0f;
-        imag[k] = 0.0f;
-        for (int t = 0; t < n; ++t) {
-            float angle = -2.0f * M_PI * k * t / n;
-            real[k] += input[t] * cosf(angle);
-            imag[k] += input[t] * sinf(angle);
+    // Copy input to real and clear imag
+    for (int i = 0; i < n; ++i) {
+        real[i] = input[i];
+        imag[i] = 0.0f;
+    }
+
+    // Check if n is a power of 2. If not, fallback to naive DFT
+    if ((n & (n - 1)) != 0) {
+        std::vector<float> temp_real(n, 0.0f);
+        std::vector<float> temp_imag(n, 0.0f);
+        for (int k = 0; k < n; ++k) {
+            for (int t = 0; t < n; ++t) {
+                float angle = -2.0f * M_PI * k * t / n;
+                temp_real[k] += input[t] * cosf(angle);
+                temp_imag[k] += input[t] * sinf(angle);
+            }
+        }
+        for (int k = 0; k < n; ++k) {
+            real[k] = temp_real[k];
+            imag[k] = temp_imag[k];
+        }
+        return;
+    }
+
+    // Bit-reversal permutation
+    int j = 0;
+    for (int i = 0; i < n - 1; i++) {
+        if (i < j) {
+            std::swap(real[i], real[j]);
+            std::swap(imag[i], imag[j]);
+        }
+        int m = n / 2;
+        while (m <= j) {
+            j -= m;
+            m /= 2;
+        }
+        j += m;
+    }
+
+    // Cooley-Tukey Decimation in Time FFT
+    for (int len = 2; len <= n; len <<= 1) {
+        float angle = -2.0f * M_PI / len;
+        float wlen_real = cosf(angle);
+        float wlen_imag = sinf(angle);
+        
+        for (int i = 0; i < n; i += len) {
+            float w_real = 1.0f;
+            float w_imag = 0.0f;
+            
+            for (int k = 0; k < len / 2; k++) {
+                int u = i + k;
+                int v = i + k + len / 2;
+                
+                float tr = w_real * real[v] - w_imag * imag[v];
+                float ti = w_real * imag[v] + w_imag * real[v];
+                
+                real[v] = real[u] - tr;
+                imag[v] = imag[u] - ti;
+                
+                real[u] = real[u] + tr;
+                imag[u] = imag[u] + ti;
+                
+                float next_w_real = w_real * wlen_real - w_imag * wlen_imag;
+                float next_w_imag = w_real * wlen_imag + w_imag * wlen_real;
+                w_real = next_w_real;
+                w_imag = next_w_imag;
+            }
         }
     }
 }
@@ -355,18 +416,31 @@ bool AudioTokenizerEncoder::compute_mel_spectrogram(const float * samples, int32
         }
         
         // Apply mel filterbank and log compression
-        // mel_spec = torch.matmul(mel_basis, spec)
-        // mel_spec = dynamic_range_compression_torch(mel_spec)  # log(clamp(x, min=1e-5) * 1)
         for (int m = 0; m < cfg.n_mels; ++m) {
             float sum = 0.0f;
             for (int k = 0; k < n_fft_bins; ++k) {
                 sum += filterbank[m * n_fft_bins + k] * magnitude[k];
             }
-            // dynamic_range_compression: log(clamp(x, min=1e-5))
-            mel[m * n_frames + f] = logf(std::max(sum, 1e-5f));
+            if (std::isnan(sum) || sum < 1e-5f) {
+                sum = 1e-5f;
+            }
+            mel[m * n_frames + f] = logf(sum);
+            
+            // Debug check for the very first frame to expose NaNs/Zeros
+            if (f == 0 && m < 5) {
+                printf("FFT-Mel Debug: Filter[%d] sum=%.6f, log=%.6f\n", m, sum, mel[m * n_frames + f]);
+            }
         }
     }
     
+    // Print stats
+    float mel_min = 1e9f, mel_max = -1e9f;
+    for (auto val : mel) {
+        if (val < mel_min) mel_min = val;
+        if (val > mel_max) mel_max = val;
+    }
+    printf("FFT-Mel Stats: min=%.6f, max=%.6f, frames=%d\n", mel_min, mel_max, n_frames);
+
     return true;
 }
 
@@ -377,41 +451,7 @@ static struct ggml_tensor * apply_reflect_pad_1d(struct ggml_context * ctx,
         return x;
     }
     
-    int64_t T = x->ne[0];
-    int64_t C = x->ne[1];
-    int64_t B = x->ne[2];
-    
-    struct ggml_tensor * left_slices[16];
-    struct ggml_tensor * right_slices[16];
-    
-    for (int i = 0; i < pad && i < 16; ++i) {
-        int left_src_idx = pad - i;
-        left_slices[i] = ggml_view_3d(ctx, x, 1, C, B,
-                                       x->nb[1], x->nb[2],
-                                       left_src_idx * x->nb[0]);
-        left_slices[i] = ggml_cont(ctx, left_slices[i]);
-        
-        int right_src_idx = T - 2 - i;
-        right_slices[i] = ggml_view_3d(ctx, x, 1, C, B,
-                                        x->nb[1], x->nb[2],
-                                        right_src_idx * x->nb[0]);
-        right_slices[i] = ggml_cont(ctx, right_slices[i]);
-    }
-    
-    struct ggml_tensor * left_pad = left_slices[0];
-    for (int i = 1; i < pad && i < 16; ++i) {
-        left_pad = ggml_concat(ctx, left_pad, left_slices[i], 0);
-    }
-    
-    struct ggml_tensor * right_pad = right_slices[0];
-    for (int i = 1; i < pad && i < 16; ++i) {
-        right_pad = ggml_concat(ctx, right_pad, right_slices[i], 0);
-    }
-    
-    struct ggml_tensor * padded = ggml_concat(ctx, left_pad, x, 0);
-    padded = ggml_concat(ctx, padded, right_pad, 0);
-    
-    return padded;
+    return ggml_pad_reflect_1d(ctx, x, pad, pad);
 }
 
 static struct ggml_tensor * apply_conv1d(struct ggml_context * ctx,
@@ -727,12 +767,6 @@ bool AudioTokenizerEncoder::encode(const float * samples, int32_t n_samples,
         return false;
     }
     
-    // mel is stored as [n_mels, n_frames] row-major: mel[m * n_frames + f] = mel bin m at frame f
-    // GGML tensor is [n_frames, n_mels] column-major: element (f, m) at memory[f + m * n_frames]
-    // For GGML conv1d, we want input(t, c) = mel bin c at time t
-    // So GGML memory[t + c * n_frames] should equal mel[c * n_frames + t]
-    // Since the memory layout matches (both are contiguous in frame order for each mel bin),
-    // we can copy directly!
     ggml_backend_tensor_set(mel_tensor, mel.data(), 0, mel.size() * sizeof(float));
     
     if (ggml_backend_sched_graph_compute(state_.sched, gf) != GGML_STATUS_SUCCESS) {
