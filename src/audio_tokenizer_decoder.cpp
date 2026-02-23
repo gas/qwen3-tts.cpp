@@ -7,7 +7,31 @@
 #include <algorithm>
 #include <numeric>
 
+#include <hip/thread>
+#include <math.h>
+
 #define QWEN3_TTS_DEC_MAX_NODES 32768
+
+__device__ void hip_snake_activation_kernel(int n, float* x, float alpha) {
+    for (int i = hip::this_thread::get_fiber_id(); i < n; i += hip::this_thread::get_width()) {
+        float val = x[i];
+        float sin_ax = sinf(alpha * val);
+        x[i] = val + (sin_ax * sin_ax) / alpha; 
+    }
+}
+
+__global__ void hip_snake_activation_kernel_standard(int n, int ne0, int channels, float* x, const float* alpha, const float* beta) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        int channel = (i / ne0) % channels;
+        float a = expf(alpha[channel]);
+        float inv_b = expf(-beta[channel]);
+        
+        float val = x[i];
+        float sin_ax = sinf(a * val);
+        x[i] = val + inv_b * (sin_ax * sin_ax); 
+    }
+}
 
 namespace qwen3_tts {
 
@@ -372,33 +396,87 @@ bool AudioTokenizerDecoder::load_model(const std::string & model_path) {
     return true;
 }
 
+void ggml_compute_forward_snake_custom3(ggml_tensor * dst, const ggml_tensor * a, const ggml_tensor * b, const ggml_tensor * c, int ith, int nth, void * userdata) {
+    int n_elements = ggml_nelements(dst);
+    int ne0 = a->ne[0];
+    int channels = a->ne[1];
+    
+    // a = x, b = alpha, c = beta
+    const ggml_tensor* alpha_tensor = b;
+    const ggml_tensor* beta_tensor = c;
+    int alpha_elements = ggml_nelements(alpha_tensor);
+    int beta_elements = ggml_nelements(beta_tensor);
+    
+    // 1. Diagnóstico: Imprimir qué está haciendo GGML por debajo
+    printf("\n--- HIPTHREADS DEBUG ---\n");
+    printf("Backend del tensor: %s\n", ggml_backend_buffer_name(dst->buffer));
+    printf("Tipo de dato: %s\n", ggml_type_name(dst->type));
+    
+    // Si GGML nos da F16, tendríamos que adaptar el kernel. Por ahora lo abortamos de forma segura.
+    if (dst->type != GGML_TYPE_F32) {
+        printf("ERROR: El tensor no es F32. Es %s.\n", ggml_type_name(dst->type));
+        return; 
+    }
+
+    // Puntero origininal que nos da GGML
+    const float* original_src_data = (const float*) a->data; 
+    float* original_dst_data = (float*) dst->data;
+    const float* original_alpha_data = (const float*) alpha_tensor->data;
+    const float* original_beta_data =  (const float*) beta_tensor->data;
+    
+    // 2. Parche de Memoria: Forzamos un buffer en la GPU
+    float* d_x;
+    float* d_alpha;
+    float* d_beta;
+    hipError_t err = hipMalloc(&d_x, n_elements * sizeof(float));
+    if (err != hipSuccess) {
+        printf("ERROR en hipMalloc d_x\n");
+        return;
+    }
+    err = hipMalloc(&d_alpha, alpha_elements * sizeof(float));
+    if (err != hipSuccess) {
+        printf("ERROR en hipMalloc d_alpha\n");
+        hipFree(d_x);
+        return;
+    }
+    err = hipMalloc(&d_beta, beta_elements * sizeof(float));
+    if (err != hipSuccess) {
+        printf("ERROR en hipMalloc d_beta\n");
+        hipFree(d_x);
+        hipFree(d_alpha);
+        return;
+    }
+    
+    // Copiamos los datos de origen (x, alpha, beta) a nuestro buffer seguro en GPU
+    hipMemcpy(d_x, original_src_data, n_elements * sizeof(float), hipMemcpyHostToDevice);
+    hipMemcpy(d_alpha, original_alpha_data, alpha_elements * sizeof(float), hipMemcpyHostToDevice);
+    hipMemcpy(d_beta, original_beta_data, beta_elements * sizeof(float), hipMemcpyHostToDevice);
+    hipDeviceSynchronize();
+
+    // 3. Ejecutamos un Kernel HIP clásico sobre el buffer 100% seguro de la GPU
+    int block_size = 256;
+    int num_blocks = (n_elements + block_size - 1) / block_size;
+    
+    // Pasar d_alpha y d_beta directamente ya que han sido copiados a la VRAM
+    hipLaunchKernelGGL(hip_snake_activation_kernel_standard, dim3(num_blocks), dim3(block_size), 0, 0, n_elements, ne0, channels, d_x, d_alpha, d_beta);
+    hipDeviceSynchronize();
+
+    // 4. Devolvemos los datos procesados al puntero de destino de GGML
+    hipMemcpy(original_dst_data, d_x, n_elements * sizeof(float), hipMemcpyDeviceToHost);
+    hipFree(d_x);
+    hipFree(d_alpha);
+    hipFree(d_beta);
+    
+    printf("--- KERNEL EJECUTADO CON ÉXITO ---\n");
+}
+
 struct ggml_tensor * AudioTokenizerDecoder::apply_snake(struct ggml_context * ctx,
                                                          struct ggml_tensor * x,
                                                          struct ggml_tensor * alpha,
                                                          struct ggml_tensor * beta) {
-    int64_t seq_len = x->ne[0];
-    int64_t channels = x->ne[1];
-    int64_t batch = x->ne[2];
-    
-    struct ggml_tensor * alpha_exp = ggml_exp(ctx, alpha);
-    
-    struct ggml_tensor * alpha_3d = ggml_reshape_3d(ctx, alpha_exp, 1, channels, 1);
-    struct ggml_tensor * alpha_broad = ggml_repeat(ctx, alpha_3d, 
-                                                    ggml_new_tensor_3d(ctx, GGML_TYPE_F32, seq_len, channels, batch));
-    
-    struct ggml_tensor * ax = ggml_mul(ctx, x, alpha_broad);
-    struct ggml_tensor * sin_ax = ggml_sin(ctx, ax);
-    struct ggml_tensor * sin_sq = ggml_sqr(ctx, sin_ax);
-    
-    struct ggml_tensor * neg_beta = ggml_scale(ctx, beta, -1.0f);
-    struct ggml_tensor * inv_beta_exp = ggml_exp(ctx, neg_beta);
-    struct ggml_tensor * inv_beta_3d = ggml_reshape_3d(ctx, inv_beta_exp, 1, channels, 1);
-    struct ggml_tensor * inv_beta = ggml_repeat(ctx, inv_beta_3d, 
-                                                 ggml_new_tensor_3d(ctx, GGML_TYPE_F32, seq_len, channels, batch));
-    
-    struct ggml_tensor * scaled_sin = ggml_mul(ctx, sin_sq, inv_beta);
-    
-    return ggml_add(ctx, x, scaled_sin);
+    // Usamos custom3 que permite pasar 3 tensores a la función personalizada.
+    // a = x, b = alpha, c = beta
+    return ggml_map_custom3(ctx, x, alpha, beta, ggml_compute_forward_snake_custom3, 1, nullptr);
 }
 
 struct ggml_tensor * AudioTokenizerDecoder::apply_rms_norm(struct ggml_context * ctx,

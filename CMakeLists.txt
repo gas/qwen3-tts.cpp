@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.14)
-project(qwen3-tts-ggml VERSION 0.1.0 LANGUAGES CXX)
+project(qwen3-tts-ggml VERSION 0.1.0 LANGUAGES CXX HIP)
+
 
 # C++ standard
 set(CMAKE_CXX_STANDARD 17)
@@ -11,6 +12,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native")
     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
 endif()
+set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -fgpu-rdc")
 
 # Timing instrumentation option
 option(QWEN3_TTS_TIMING "Enable detailed timing instrumentation" OFF)
@@ -26,6 +28,9 @@ endif()
 
 # Find threads
 find_package(Threads REQUIRED)
+find_package(hipthreads REQUIRED)
+find_package(rocprim REQUIRED CONFIG)
+find_package(rocthrust REQUIRED CONFIG)
 
 # GGML library paths
 set(GGML_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ggml")
@@ -109,6 +114,11 @@ add_library(audio_tokenizer_decoder STATIC
     src/audio_tokenizer_decoder.cpp
     src/gguf_loader.cpp
 )
+set_source_files_properties(src/audio_tokenizer_decoder.cpp PROPERTIES LANGUAGE HIP)
+set_target_properties(audio_tokenizer_decoder PROPERTIES 
+    HIP_SEPARABLE_COMPILATION ON
+    LINKER_LANGUAGE HIP
+)
 target_include_directories(audio_tokenizer_decoder PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${GGML_DIR}/include
@@ -121,11 +131,17 @@ target_link_libraries(audio_tokenizer_decoder PUBLIC
     ggml-base
     ggml-cpu
     Threads::Threads
+    hipthreads::hipthreads
 )
 
 # Qwen3 TTS library (full pipeline)
 add_library(qwen3_tts STATIC
     src/qwen3_tts.cpp
+)
+set_source_files_properties(src/qwen3_tts.cpp PROPERTIES LANGUAGE HIP)
+set_target_properties(qwen3_tts PROPERTIES 
+    HIP_SEPARABLE_COMPILATION ON
+    LINKER_LANGUAGE HIP
 )
 target_include_directories(qwen3_tts PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -137,14 +153,21 @@ target_link_libraries(qwen3_tts PUBLIC
     audio_tokenizer_encoder
     audio_tokenizer_decoder
     Threads::Threads
+    roc::rocthrust
 )
 
 # CLI executable
 add_executable(qwen3-tts-cli
     src/main.cpp
 )
+set_source_files_properties(src/main.cpp PROPERTIES LANGUAGE HIP)
+set_target_properties(qwen3-tts-cli PROPERTIES 
+    HIP_SEPARABLE_COMPILATION ON
+    LINKER_LANGUAGE HIP
+)
 target_link_libraries(qwen3-tts-cli PRIVATE
     qwen3_tts
+    hipthreads::hipthreads
 )
 
 # Test executable for tokenizer
@@ -178,9 +201,16 @@ target_link_libraries(test_transformer PRIVATE
 add_executable(test_decoder
     tests/test_decoder.cpp
 )
+set_source_files_properties(tests/test_decoder.cpp PROPERTIES LANGUAGE HIP)
+set_target_properties(test_decoder PROPERTIES 
+    HIP_SEPARABLE_COMPILATION ON
+    LINKER_LANGUAGE HIP
+)
 target_link_libraries(test_decoder PRIVATE
     audio_tokenizer_decoder
     Threads::Threads
+    roc::rocthrust
+    hipthreads::hipthreads
 )
 
 # Install targets
