@@ -1,0 +1,58 @@
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Depuración de hilo usando libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+Loading models from: models
+  [mem] load/start               rss=80.18 MB  phys=80.18 MB
+Loading TTS model from models/qwen3-tts-0.6b-f16.gguf...
+  Text tokenizer loaded: vocab_size=151936 (178 ms)
+  [mem] load/after-tokenizer     rss=124.04 MB  phys=124.04 MB
+  Speaker encoder: deferred (lazy load)
+[Nuevo Thread 0x7fffb37ff6c0 (LWP 641109)]
+[Nuevo Thread 0x7fffb2ffe6c0 (LWP 641110)]
+[Thread 0x7fffb2ffe6c0 (LWP 641110) terminado]
+ggml_cuda_init: found 1 ROCm devices:
+  Device 0: AMD Radeon Graphics, gfx1201 (0x1201), VMM: no, Wave Size: 32
+[Nuevo Thread 0x7fffabfff6c0 (LWP 641111)]
+  TTSTransformer backend: ROCm0
+  TTS transformer loaded: hidden_size=1024, n_layers=28 (641 ms)
+  [mem] load/after-transformer   rss=881.11 MB  phys=881.11 MB
+Loading vocoder from models/qwen3-tts-tokenizer-f16.gguf...
+  AudioTokenizerDecoder backend: ROCm0
+  Vocoder loaded: sample_rate=24000, n_codebooks=16 (126 ms)
+  [mem] load/after-vocoder       rss=881.11 MB  phys=881.11 MB
+All models loaded in 946 ms
+  [mem] load/end                 rss=881.11 MB  phys=881.11 MB
+Synthesizing with voice cloning: "Test"
+Reference audio: /home/gas/code/rocm/rocmm/referencias/voz_test_0493.wav
+Resampling audio from 22050 Hz to 24000 Hz...
+  AudioTokenizerEncoder backend: ROCm0
+  Speaker encoder lazy-loaded in 30 ms
+  [mem] voice/after-encoder-load rss=881.11 MB  phys=881.11 MB
+[Nuevo Thread 0x7ffdd6e066c0 (LWP 641121)]
+[Nuevo Thread 0x7ffdd66056c0 (LWP 641122)]
+[Nuevo Thread 0x7ffdd5e046c0 (LWP 641123)]
+  [mem] synth/start              rss=881.11 MB  phys=881.11 MB
+  [mem] synth/after-tokenize     rss=881.11 MB  phys=881.11 MB
+[Nuevo Thread 0x7ffdaddff6c0 (LWP 641127)]
+[Thread 0x7ffdaddff6c0 (LWP 641127) terminado]
+
+Thread 1 "qwen3-tts-cli" received signal SIGSEGV, Segmentation fault.
+0x0000000000000000 in ?? ()
+#0  0x0000000000000000 in ?? ()
+#1  0x00007ffff64973e4 in ggml_compute_forward_map_custom3 () from /home/gas/code/qwen3-tts.cpp/ggml/build/src/libggml-cpu.so.0
+#2  0x00007ffff63f7b9d in ggml_graph_compute_thread.isra () from /home/gas/code/qwen3-tts.cpp/ggml/build/src/libggml-cpu.so.0
+#3  0x00007ffff63f9243 in ggml_graph_compute () from /home/gas/code/qwen3-tts.cpp/ggml/build/src/libggml-cpu.so.0
+#4  0x00007ffff63f95c1 in ggml_backend_cpu_graph_compute(ggml_backend*, ggml_cgraph*) () from /home/gas/code/qwen3-tts.cpp/ggml/build/src/libggml-cpu.so.0
+#5  0x00007ffff658e747 in ggml_backend_sched_graph_compute_async () from /home/gas/code/qwen3-tts.cpp/ggml/build/src/libggml-base.so.0
+#6  0x00007ffff658ea22 in ggml_backend_sched_graph_compute () from /home/gas/code/qwen3-tts.cpp/ggml/build/src/libggml-base.so.0
+#7  0x000000000024066d in qwen3_tts::TTSTransformer::predict_codes_autoregressive(float const*, int, std::vector<int, std::allocator<int> >&, float, int) ()
+#8  0x0000000000241e2d in qwen3_tts::TTSTransformer::generate(int const*, int, float const*, int, std::vector<int, std::allocator<int> >&, int, float, float, int) ()
+#9  0x000000000022249e in qwen3_tts::Qwen3TTS::synthesize_internal(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, float const*, qwen3_tts::tts_params const&, qwen3_tts::tts_result&) ()
+#10 0x000000000022419e in qwen3_tts::Qwen3TTS::synthesize_with_voice(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, float const*, int, qwen3_tts::tts_params const&) ()
+#11 0x00000000002230b0 in qwen3_tts::Qwen3TTS::synthesize_with_voice(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, qwen3_tts::tts_params const&) ()
+#12 0x000000000021fdef in main ()

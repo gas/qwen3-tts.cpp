@@ -31,10 +31,15 @@ from typing import Iterable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
-
+"""
 BASE_REPO_IDS = [
     "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
     "Qwen/Qwen3-TTS-0.6B-Base",
+]
+"""
+BASE_REPO_IDS = [
+    "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+    "Qwen/Qwen3-TTS-1.7B-Base",
 ]
 TOKENIZER_REPO_IDS = [
     "Qwen/Qwen3-TTS-Tokenizer-12Hz",
@@ -261,7 +266,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--coreml",
         choices=["auto", "on", "off"],
-        default="auto",
+        default="off",
         help="CoreML export mode: auto=macOS only, on=force, off=disable",
     )
     p.add_argument("--force", action="store_true", help="Re-download/re-generate outputs")
@@ -272,9 +277,9 @@ def main() -> int:
     args = parse_args()
 
     models_dir = Path(args.models_dir).resolve()
-    base_dir = models_dir / "Qwen3-TTS-12Hz-0.6B-Base"
+    base_dir = models_dir / "Qwen3-TTS-12Hz-1.7B-Base"
     tokenizer_dir = models_dir / "Qwen3-TTS-Tokenizer-12Hz"
-    out_tts = models_dir / "qwen3-tts-0.6b-f16.gguf"
+    out_tts = models_dir / "qwen3-tts-1.7b-f16.gguf"
     out_tok = models_dir / "qwen3-tts-tokenizer-f16.gguf"
     out_coreml = models_dir / "coreml" / "code_predictor.mlpackage"
 

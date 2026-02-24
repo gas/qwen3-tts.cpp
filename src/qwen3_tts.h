@@ -85,8 +85,8 @@ public:
     ~Qwen3TTS();
     
     // Load all models from directory
-    // model_dir should contain: transformer.gguf, tokenizer.gguf, vocoder.gguf
-    bool load_models(const std::string & model_dir);
+    // model_dir should contain: tokenizer.gguf, vocoder.gguf
+    bool load_models(const std::string & model_dir, const std::string & tts_model_name = "");
     
     // Generate speech from text
     // text: input text to synthesize

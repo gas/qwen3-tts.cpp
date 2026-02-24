@@ -1,0 +1,109 @@
+./build/qwen3-tts-cli -m ./models -tts qwen3-tts-0.6b-f16.gguf -l es  -t "Apple y la Fórmula 1 llevan su alianza al cine: desde 2026, cinco Grandes Premios se proyectarán en IMAX para una experiencia sin igual."   -r /home/gas/code/rocm/rocmm/referencias/voz_test_0493.wav   -o ./output/noticia0.6b.wav
+Loading models from: ./models
+  [mem] load/start               rss=80.18 MB  phys=80.18 MB
+Loading TTS model from ./models/qwen3-tts-0.6b-f16.gguf...
+  Text tokenizer loaded: vocab_size=151936 (169 ms)
+  [mem] load/after-tokenizer     rss=124.57 MB  phys=124.57 MB
+  Speaker encoder: deferred (lazy load)
+ggml_cuda_init: found 1 ROCm devices:
+  Device 0: AMD Radeon Graphics, gfx1201 (0x1201), VMM: no, Wave Size: 32
+  TTSTransformer backend: ROCm0
+  TTS transformer loaded: hidden_size=1024, n_layers=28 (509 ms)
+  [mem] load/after-transformer   rss=870.81 MB  phys=870.81 MB
+Loading vocoder from ./models/qwen3-tts-tokenizer-f16.gguf...
+  AudioTokenizerDecoder backend: ROCm0
+  Vocoder loaded: sample_rate=24000, n_codebooks=16 (109 ms)
+  [mem] load/after-vocoder       rss=870.81 MB  phys=870.81 MB
+All models loaded in 788 ms
+  [mem] load/end                 rss=870.81 MB  phys=870.81 MB
+Synthesizing with voice cloning: "Apple y la Fórmula 1 llevan su alianza al cine: desde 2026, cinco Grandes Premios se proyectarán en IMAX para una experiencia sin igual."
+Reference audio: /home/gas/code/rocm/rocmm/referencias/voz_test_0493.wav
+Resampling audio from 22050 Hz to 24000 Hz...
+  AudioTokenizerEncoder backend: ROCm0
+  Speaker encoder lazy-loaded in 28 ms
+  [mem] voice/after-encoder-load rss=870.81 MB  phys=870.81 MB
+FFT-Mel Debug: Filter[0] sum=0.149061, log=-1.903402
+FFT-Mel Debug: Filter[1] sum=0.150194, log=-1.895828
+FFT-Mel Debug: Filter[2] sum=0.145625, log=-1.926722
+FFT-Mel Debug: Filter[3] sum=0.148970, log=-1.904011
+FFT-Mel Debug: Filter[4] sum=0.235390, log=-1.446509
+FFT-Mel Stats: min=-11.512925, max=1.411607, frames=773
+  [mem] synth/start              rss=870.81 MB  phys=870.81 MB
+  [mem] synth/after-tokenize     rss=870.81 MB  phys=870.81 MB
+
+=== Detailed Generation Timing (118 frames) ===
+
+  Prefill:
+    Build graph:         530.8 ms
+    Forward total:      1061.9 ms
+      Graph build:         0.1 ms
+      Graph alloc:         0.2 ms
+      Compute:          1061.5 ms
+      Data I/O:            0.1 ms
+
+  Talker forward_step (total / per-frame):
+    Total:             16351.6 ms   (138.6 ms/frame)
+      Graph build:        10.0 ms   (0.1 ms/frame)
+      Graph alloc:        19.5 ms   (0.2 ms/frame)
+      Compute:         16311.3 ms   (138.2 ms/frame)
+      Data I/O:            9.9 ms   (0.1 ms/frame)
+
+  Code predictor (total / per-frame):
+    Backend:          GGML
+    Total:             42721.1 ms   (362.0 ms/frame)
+      Init/KV/embed:       6.0 ms   (0.1 ms/frame)
+      Prefill (2tok):    252.1 ms   (2.1 ms/frame)
+      Steps (14):      42462.9 ms   (359.9 ms/frame)
+      Graph build:        26.7 ms   (0.2 ms/frame)
+      Graph alloc:        78.5 ms   (0.7 ms/frame)
+      Compute:         42533.8 ms   (360.5 ms/frame)
+      Data I/O:           73.2 ms   (0.6 ms/frame)
+      CoreML total:        0.0 ms   (0.0 ms/frame)
+
+  Embed lookups:          77.2 ms   (0.7 ms/frame)
+  Other/overhead:         28.5 ms
+  ─────────────────────────────────────────
+  Total generate:      60771.0 ms
+  Throughput:            515.0 ms/frame (1.9 frames/s)
+  [mem] synth/after-generate     rss=1002.91 MB  phys=1002.91 MB
+IM2COL SUSPICIOUS GRID: num_blocks=6, OW=75336, N*OH=1
+IM2COL SUSPICIOUS GRID: num_blocks=1, OW=75336, N*OH=1
+IM2COL SUSPICIOUS GRID: num_blocks=6, OW=75336, N*OH=1
+IM2COL SUSPICIOUS GRID: num_blocks=1, OW=75336, N*OH=1
+IM2COL SUSPICIOUS GRID: num_blocks=6, OW=75336, N*OH=1
+IM2COL SUSPICIOUS GRID: num_blocks=1, OW=75336, N*OH=1
+IM2COL SUSPICIOUS GRID: num_blocks=3, OW=226005, N*OH=1
+IM2COL SUSPICIOUS GRID: num_blocks=1, OW=226005, N*OH=1
+IM2COL SUSPICIOUS GRID: num_blocks=3, OW=226005, N*OH=1
+IM2COL SUSPICIOUS GRID: num_blocks=1, OW=226005, N*OH=1
+IM2COL SUSPICIOUS GRID: num_blocks=3, OW=226005, N*OH=1
+IM2COL SUSPICIOUS GRID: num_blocks=1, OW=226005, N*OH=1
+IM2COL SUSPICIOUS GRID: num_blocks=3, OW=226005, N*OH=1
+  [mem] synth/after-decode       rss=1.28 GB  phys=1.28 GB
+  [mem] synth/end                rss=1.28 GB  phys=1.28 GB
+
+Timing:
+  Tokenization:    0 ms
+  Speaker encode:  264 ms
+  Code generation: 60771 ms
+  Vocoder decode:  1111 ms
+  Total:           61882 ms
+  Audio duration:  9.42 s
+  Throughput:      0.15x realtime (RTF=6.571)
+
+Memory:
+  RSS start/end:   870.81 MB -> 1.28 GB
+  RSS peak:        1.28 GB
+  Phys start/end:  870.81 MB -> 1.28 GB
+  Phys peak:       1.28 GB
+
+Output saved to: ./output/noticia0.6b.wav
+Audio duration: 9.42 seconds
+
+Timing:
+  Load:           0 ms
+  Tokenize:       0 ms
+  Encode:       264 ms
+  Generate:   60771 ms
+  Decode:      1111 ms
+  Total:      61882 ms

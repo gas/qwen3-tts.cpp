@@ -289,6 +289,22 @@ bool TTSTransformer::parse_config(struct gguf_context * ctx) {
         "qwen3-tts.code_pred.vocab_size",
         "qwen3-tts.code_predictor.vocab_size",
     }, 2048);
+    cfg.code_pred_hidden_size = get_u32_any({
+        "qwen3-tts.code_pred.embedding_length",
+        "qwen3-tts.code_predictor.embedding_length",
+    }, cfg.hidden_size);
+    cfg.code_pred_intermediate_size = get_u32_any({
+        "qwen3-tts.code_pred.feed_forward_length",
+        "qwen3-tts.code_predictor.feed_forward_length",
+    }, cfg.intermediate_size);
+    cfg.code_pred_n_attention_heads = get_u32_any({
+        "qwen3-tts.code_pred.attention.head_count",
+        "qwen3-tts.code_predictor.attention.head_count",
+    }, cfg.n_attention_heads);
+    cfg.code_pred_n_key_value_heads = get_u32_any({
+        "qwen3-tts.code_pred.attention.head_count_kv",
+        "qwen3-tts.code_predictor.attention.head_count_kv",
+    }, cfg.n_key_value_heads);
 
     cfg.codec_pad_id = get_u32_any({
         "qwen3-tts.codec.pad_id",
@@ -456,6 +472,13 @@ bool TTSTransformer::create_tensors(struct gguf_context * ctx) {
             } else {
                 continue;
             }
+        } else if (strstr(name, "code_pred.proj_in.weight")) {
+            ne[0] = cfg.hidden_size;
+            ne[1] = cfg.code_pred_hidden_size;
+            n_dims = 2;
+        } else if (strstr(name, "code_pred.proj_in.bias")) {
+            ne[0] = cfg.code_pred_hidden_size;
+            n_dims = 1;
         } else if (strstr(name, "code_pred.blk.")) {
             if (skip_ggml_code_pred_layers_) {
                 continue;
@@ -465,7 +488,7 @@ bool TTSTransformer::create_tensors(struct gguf_context * ctx) {
                 layer_idx >= 0 && layer_idx < cfg.code_pred_layers) {
                 
                 if (strstr(name, "attn_norm.weight")) {
-                    ne[0] = cfg.hidden_size;
+                    ne[0] = cfg.code_pred_hidden_size;
                     n_dims = 1;
                 } else if (strstr(name, "attn_q_norm.weight")) {
                     ne[0] = cfg.head_dim;
@@ -474,35 +497,35 @@ bool TTSTransformer::create_tensors(struct gguf_context * ctx) {
                     ne[0] = cfg.head_dim;
                     n_dims = 1;
                 } else if (strstr(name, "attn_q.weight")) {
-                    ne[0] = cfg.hidden_size;
-                    ne[1] = cfg.n_attention_heads * cfg.head_dim;
+                    ne[0] = cfg.code_pred_hidden_size;
+                    ne[1] = cfg.code_pred_n_attention_heads * cfg.head_dim;
                     n_dims = 2;
                 } else if (strstr(name, "attn_k.weight")) {
-                    ne[0] = cfg.hidden_size;
-                    ne[1] = cfg.n_key_value_heads * cfg.head_dim;
+                    ne[0] = cfg.code_pred_hidden_size;
+                    ne[1] = cfg.code_pred_n_key_value_heads * cfg.head_dim;
                     n_dims = 2;
                 } else if (strstr(name, "attn_v.weight")) {
-                    ne[0] = cfg.hidden_size;
-                    ne[1] = cfg.n_key_value_heads * cfg.head_dim;
+                    ne[0] = cfg.code_pred_hidden_size;
+                    ne[1] = cfg.code_pred_n_key_value_heads * cfg.head_dim;
                     n_dims = 2;
                 } else if (strstr(name, "attn_output.weight")) {
-                    ne[0] = cfg.n_attention_heads * cfg.head_dim;
-                    ne[1] = cfg.hidden_size;
+                    ne[0] = cfg.code_pred_n_attention_heads * cfg.head_dim;
+                    ne[1] = cfg.code_pred_hidden_size;
                     n_dims = 2;
                 } else if (strstr(name, "ffn_norm.weight")) {
-                    ne[0] = cfg.hidden_size;
+                    ne[0] = cfg.code_pred_hidden_size;
                     n_dims = 1;
                 } else if (strstr(name, "ffn_gate.weight")) {
-                    ne[0] = cfg.hidden_size;
-                    ne[1] = cfg.intermediate_size;
+                    ne[0] = cfg.code_pred_hidden_size;
+                    ne[1] = cfg.code_pred_intermediate_size;
                     n_dims = 2;
                 } else if (strstr(name, "ffn_up.weight")) {
-                    ne[0] = cfg.hidden_size;
-                    ne[1] = cfg.intermediate_size;
+                    ne[0] = cfg.code_pred_hidden_size;
+                    ne[1] = cfg.code_pred_intermediate_size;
                     n_dims = 2;
                 } else if (strstr(name, "ffn_down.weight")) {
-                    ne[0] = cfg.intermediate_size;
-                    ne[1] = cfg.hidden_size;
+                    ne[0] = cfg.code_pred_intermediate_size;
+                    ne[1] = cfg.code_pred_hidden_size;
                     n_dims = 2;
                 } else {
                     continue;
@@ -527,7 +550,7 @@ bool TTSTransformer::create_tensors(struct gguf_context * ctx) {
              int cb_idx = -1;
              if (sscanf(name, "code_pred.lm_head.%d.weight", &cb_idx) == 1 &&
                  cb_idx >= 0 && cb_idx < cfg.n_codebooks - 1) {
-                 ne[0] = cfg.hidden_size;
+                 ne[0] = cfg.code_pred_hidden_size;
                  ne[1] = cfg.code_pred_vocab_size;
                  n_dims = 2;
              } else {
@@ -537,7 +560,7 @@ bool TTSTransformer::create_tensors(struct gguf_context * ctx) {
              if (skip_ggml_code_pred_layers_) {
                  continue;
              }
-             ne[0] = cfg.hidden_size;
+             ne[0] = cfg.code_pred_hidden_size;
              n_dims = 1;
          } else {
              continue;
@@ -584,6 +607,10 @@ bool TTSTransformer::create_tensors(struct gguf_context * ctx) {
                 else if (strstr(name, "ffn_up.weight")) layer.ffn_up = tensor;
                 else if (strstr(name, "ffn_down.weight")) layer.ffn_down = tensor;
             }
+        } else if (strstr(name, "code_pred.proj_in.weight")) {
+            model_.code_pred_proj_in = tensor;
+        } else if (strstr(name, "code_pred.proj_in.bias")) {
+            model_.code_pred_proj_in_bias = tensor;
         } else if (strstr(name, "code_pred.blk.")) {
             int layer_idx = -1;
             sscanf(name, "code_pred.blk.%d.", &layer_idx);
@@ -1412,10 +1439,11 @@ struct ggml_cgraph * TTSTransformer::build_step_graph(int32_t n_past) {
 
 struct ggml_cgraph * TTSTransformer::build_code_pred_graph(int32_t n_prev_codes) {
     const auto & cfg = model_.config;
-    const int n_head = cfg.n_attention_heads;
-    const int n_kv_head = cfg.n_key_value_heads;
+    const int n_head = cfg.code_pred_n_attention_heads;
+    const int n_kv_head = cfg.code_pred_n_key_value_heads;
     const int head_dim = cfg.head_dim;
     const int hidden_size = cfg.hidden_size;
+    const int code_pred_hidden_size = cfg.code_pred_hidden_size;
     const float eps = cfg.rms_norm_eps;
     const int n_layer = cfg.code_pred_layers;
     const int n_codebooks = cfg.n_codebooks;
@@ -1442,10 +1470,26 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_graph(int32_t n_prev_codes)
     
     struct ggml_tensor * cur = ggml_reshape_2d(ctx0, inp_hidden, hidden_size, 1);
     
+    if (model_.code_pred_proj_in) {
+        cur = ggml_mul_mat(ctx0, model_.code_pred_proj_in, cur);
+        if (model_.code_pred_proj_in_bias) {
+            cur = ggml_add(ctx0, cur, model_.code_pred_proj_in_bias);
+        }
+    }
+    
     if (n_prev_codes > 0 && inp_prev_codes) {
         for (int cb = 0; cb < n_prev_codes && cb < n_codebooks - 1; ++cb) {
             struct ggml_tensor * code_idx = ggml_view_1d(ctx0, inp_prev_codes, 1, cb * sizeof(int32_t));
             struct ggml_tensor * code_embd = ggml_get_rows(ctx0, model_.code_pred_embd[cb], code_idx);
+            
+            if (model_.code_pred_proj_in) {
+                code_embd = ggml_reshape_2d(ctx0, code_embd, hidden_size, 1);
+                code_embd = ggml_mul_mat(ctx0, model_.code_pred_proj_in, code_embd);
+                if (model_.code_pred_proj_in_bias) {
+                    code_embd = ggml_add(ctx0, code_embd, model_.code_pred_proj_in_bias);
+                }
+            }
+            
             cur = ggml_add(ctx0, cur, code_embd);
         }
     }
@@ -1549,10 +1593,11 @@ static void cpu_autoregressive_sampler(struct ggml_tensor * dst, const struct gg
 
 struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph() {
     const auto & cfg = model_.config;
-    const int n_head = cfg.n_attention_heads;
-    const int n_kv_head = cfg.n_key_value_heads;
+    const int n_head = cfg.code_pred_n_attention_heads;
+    const int n_kv_head = cfg.code_pred_n_key_value_heads;
     const int head_dim = cfg.head_dim;
     const int hidden_size = cfg.hidden_size;
+    const int code_pred_hidden_size = cfg.code_pred_hidden_size;
     const float eps = cfg.rms_norm_eps;
     const float rope_theta = cfg.rope_theta;
     const int n_layer = cfg.code_pred_layers;
@@ -1585,6 +1630,13 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph() {
     struct ggml_tensor * hidden_2d = ggml_reshape_2d(ctx0, inp_hidden, hidden_size, 1);
     struct ggml_tensor * cb0_2d = ggml_reshape_2d(ctx0, inp_cb0_embd, hidden_size, 1);
     struct ggml_tensor * cur = ggml_concat(ctx0, hidden_2d, cb0_2d, 1);
+    
+    if (model_.code_pred_proj_in) {
+        cur = ggml_mul_mat(ctx0, model_.code_pred_proj_in, cur);
+        if (model_.code_pred_proj_in_bias) {
+            cur = ggml_add(ctx0, cur, model_.code_pred_proj_in_bias);
+        }
+    }
     
     struct ggml_tensor * inpL = cur;
     
@@ -1677,8 +1729,8 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph() {
      cur = ggml_rms_norm(ctx0, cur, eps);
      cur = ggml_mul(ctx0, cur, model_.code_pred_output_norm);
      
-     struct ggml_tensor * last_hidden = ggml_view_2d(ctx0, cur, hidden_size, 1, 
-                                                      cur->nb[1], hidden_size * sizeof(float));
+     struct ggml_tensor * last_hidden = ggml_view_2d(ctx0, cur, code_pred_hidden_size, 1, 
+                                                      cur->nb[1], code_pred_hidden_size * sizeof(float));
      
      struct ggml_tensor * logits = ggml_mul_mat(ctx0, model_.code_pred_head[0], last_hidden);
     ggml_set_name(logits, "logits");
@@ -1702,10 +1754,11 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph() {
 
 struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(int32_t n_past, int32_t generation_step) {
     const auto & cfg = model_.config;
-    const int n_head = cfg.n_attention_heads;
-    const int n_kv_head = cfg.n_key_value_heads;
+    const int n_head = cfg.code_pred_n_attention_heads;
+    const int n_kv_head = cfg.code_pred_n_key_value_heads;
     const int head_dim = cfg.head_dim;
     const int hidden_size = cfg.hidden_size;
+    const int code_pred_hidden_size = cfg.code_pred_hidden_size;
     const float eps = cfg.rms_norm_eps;
     const float rope_theta = cfg.rope_theta;
     const int n_layer = cfg.code_pred_layers;
@@ -1735,9 +1788,21 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(int32_t n_past, 
     struct ggml_tensor * cur;
     if (generation_step == 0) {
         cur = ggml_reshape_2d(ctx0, inp_hidden, hidden_size, 1);
+        if (model_.code_pred_proj_in) {
+            cur = ggml_mul_mat(ctx0, model_.code_pred_proj_in, cur);
+            if (model_.code_pred_proj_in_bias) {
+                cur = ggml_add(ctx0, cur, model_.code_pred_proj_in_bias);
+            }
+        }
     } else {
         cur = ggml_get_rows(ctx0, model_.code_pred_embd[generation_step - 1], inp_code);
         cur = ggml_reshape_2d(ctx0, cur, hidden_size, 1);
+        if (model_.code_pred_proj_in) {
+            cur = ggml_mul_mat(ctx0, model_.code_pred_proj_in, cur);
+            if (model_.code_pred_proj_in_bias) {
+                cur = ggml_add(ctx0, cur, model_.code_pred_proj_in_bias);
+            }
+        }
     }
     
     struct ggml_tensor * inpL = cur;
@@ -2348,6 +2413,13 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden, int32_t 
         error_msg_ = "Model not loaded";
         return false;
     }
+
+    if (!hidden) {
+        error_msg_ = "hidden is null";
+        return false;
+    }
+
+
     
     const auto & cfg = model_.config;
 
@@ -2604,6 +2676,7 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden, int32_t 
         int32_t selected_token = 0;
         ggml_backend_tensor_get(sampled_out, &selected_token, 0, sizeof(int32_t));
         output[step] = selected_token;
+
         
         ggml_backend_sched_reset(state_.sched);
 #ifdef QWEN3_TTS_TIMING

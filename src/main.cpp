@@ -9,6 +9,7 @@ void print_usage(const char * program) {
     fprintf(stderr, "\n");
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -m, --model <dir>      Model directory (required)\n");
+    fprintf(stderr, "  -tts, --tts-model <name> TTS GGUF filename (default: qwen3-tts-0.6b-f16.gguf)\n");
     fprintf(stderr, "  -t, --text <text>      Text to synthesize (required)\n");
     fprintf(stderr, "  -o, --output <file>    Output WAV file (default: output.wav)\n");
     fprintf(stderr, "  -r, --reference <file> Reference audio for voice cloning\n");
@@ -31,6 +32,7 @@ int main(int argc, char ** argv) {
     std::string text;
     std::string output_file = "output.wav";
     std::string reference_audio;
+    std::string tts_model_name;
     
     qwen3_tts::tts_params params;
     
@@ -47,6 +49,12 @@ int main(int argc, char ** argv) {
                 return 1;
             }
             model_dir = argv[i];
+        } else if (arg == "-tts" || arg == "--tts-model") {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: missing TTS model filename\n");
+                return 1;
+            }
+            tts_model_name = argv[i];
         } else if (arg == "-t" || arg == "--text") {
             if (++i >= argc) {
                 fprintf(stderr, "Error: missing text\n");
@@ -145,7 +153,7 @@ int main(int argc, char ** argv) {
     qwen3_tts::Qwen3TTS tts;
     
     fprintf(stderr, "Loading models from: %s\n", model_dir.c_str());
-    if (!tts.load_models(model_dir)) {
+    if (!tts.load_models(model_dir, tts_model_name)) {
         fprintf(stderr, "Error: %s\n", tts.get_error().c_str());
         return 1;
     }
