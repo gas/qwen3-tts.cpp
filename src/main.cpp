@@ -10,8 +10,9 @@ void print_usage(const char * program) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -m, --model <dir>      Model directory (required)\n");
     fprintf(stderr, "  -tts, --tts-model <name> TTS GGUF filename (default: qwen3-tts-0.6b-f16.gguf)\n");
-    fprintf(stderr, "  -t, --text <text>      Text to synthesize (required)\n");
-    fprintf(stderr, "  -o, --output <file>    Output WAV file (default: output.wav)\n");
+    fprintf(stderr, "  -t, --text <text>      Text to synthesize (can be specified multiple times)\n");
+    fprintf(stderr, "  -f, --file <file>      Text file with phrases to synthesize (one per line)\n");
+    fprintf(stderr, "  -o, --output <file>    Output WAV file prefix/name (default: output)\n");
     fprintf(stderr, "  -r, --reference <file> Reference audio for voice cloning\n");
     fprintf(stderr, "  --temperature <val>    Sampling temperature (default: 0.9, 0=greedy)\n");
     fprintf(stderr, "  --top-k <n>            Top-k sampling (default: 50, 0=disabled)\n");
@@ -29,7 +30,8 @@ void print_usage(const char * program) {
 
 int main(int argc, char ** argv) {
     std::string model_dir;
-    std::string text;
+    std::vector<std::string> texts;
+    std::string input_file;
     std::string output_file = "output.wav";
     std::string reference_audio;
     std::string tts_model_name;
@@ -60,7 +62,13 @@ int main(int argc, char ** argv) {
                 fprintf(stderr, "Error: missing text\n");
                 return 1;
             }
-            text = argv[i];
+            texts.push_back(argv[i]);
+        } else if (arg == "-f" || arg == "--file") {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: missing input file\n");
+                return 1;
+            }
+            input_file = argv[i];
         } else if (arg == "-o" || arg == "--output") {
             if (++i >= argc) {
                 fprintf(stderr, "Error: missing output file\n");
@@ -143,8 +151,23 @@ int main(int argc, char ** argv) {
         return 1;
     }
     
-    if (text.empty()) {
-        fprintf(stderr, "Error: text is required\n");
+    if (!input_file.empty()) {
+        FILE * fp = fopen(input_file.c_str(), "r");
+        if (!fp) {
+            fprintf(stderr, "Error: failed to open input file: %s\n", input_file.c_str());
+            return 1;
+        }
+        char line[4096];
+        while (fgets(line, sizeof(line), fp)) {
+            std::string s(line);
+            while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+            if (!s.empty()) texts.push_back(s);
+        }
+        fclose(fp);
+    }
+    
+    if (texts.empty()) {
+        fprintf(stderr, "Error: text (-t) or input file (-f) is required\n");
         print_usage(argv[0]);
         return 1;
     }
@@ -164,44 +187,60 @@ int main(int argc, char ** argv) {
     });
     
     // Generate speech
-    qwen3_tts::tts_result result;
+    std::vector<qwen3_tts::tts_result> results;
     
     if (reference_audio.empty()) {
-        fprintf(stderr, "Synthesizing: \"%s\"\n", text.c_str());
-        result = tts.synthesize(text, params);
+        fprintf(stderr, "Synthesizing %zu texts sequentially (Batching API)...\n", texts.size());
+        results = tts.synthesize_batch(texts, "", params);
     } else {
-        fprintf(stderr, "Synthesizing with voice cloning: \"%s\"\n", text.c_str());
+        fprintf(stderr, "Synthesizing %zu texts with voice cloning (Batching API)...\n", texts.size());
         fprintf(stderr, "Reference audio: %s\n", reference_audio.c_str());
-        result = tts.synthesize_with_voice(text, reference_audio, params);
-    }
-    
-    if (!result.success) {
-        fprintf(stderr, "\nError: %s\n", result.error_msg.c_str());
-        return 1;
+        results = tts.synthesize_batch(texts, reference_audio, params);
     }
     
     fprintf(stderr, "\n");
     
-    // Save output
-    if (!qwen3_tts::save_audio_file(output_file, result.audio, result.sample_rate)) {
-        fprintf(stderr, "Error: failed to save output file: %s\n", output_file.c_str());
-        return 1;
+    // Save outputs
+    bool has_errors = false;
+    for (size_t i = 0; i < results.size(); ++i) {
+        const auto & result = results[i];
+        if (!result.success) {
+            fprintf(stderr, "Error in sequence %zu: %s\n", i + 1, result.error_msg.c_str());
+            has_errors = true;
+            continue;
+        }
+        
+        std::string current_output_file = output_file;
+        if (texts.size() > 1) {
+            size_t dot_pos = output_file.find_last_of('.');
+            if (dot_pos == std::string::npos) {
+                current_output_file = output_file + "_" + std::to_string(i) + ".wav";
+            } else {
+                current_output_file = output_file.substr(0, dot_pos) + "_" + std::to_string(i) + output_file.substr(dot_pos);
+            }
+        }
+        
+        if (!qwen3_tts::save_audio_file(current_output_file, result.audio, result.sample_rate)) {
+            fprintf(stderr, "Error: failed to save output file: %s\n", current_output_file.c_str());
+            has_errors = true;
+            continue;
+        }
+        
+        fprintf(stderr, "Output %zu saved to: %s (%.2f seconds)\n", 
+                i + 1, current_output_file.c_str(), (float)result.audio.size() / result.sample_rate);
+                
+        // Print timing for the first one as representative, or print all if requested
+        if (params.print_timing && i == 0) {
+            fprintf(stderr, "\nTiming (Sequence 1):\n");
+            fprintf(stderr, "  Load:      %6lld ms\n", (long long)result.t_load_ms);
+            fprintf(stderr, "  Tokenize:  %6lld ms\n", (long long)result.t_tokenize_ms);
+            fprintf(stderr, "  Encode:    %6lld ms\n", (long long)result.t_encode_ms);
+            fprintf(stderr, "  Generate:  %6lld ms\n", (long long)result.t_generate_ms);
+            fprintf(stderr, "  Decode:    %6lld ms\n", (long long)result.t_decode_ms);
+            fprintf(stderr, "  Total:     %6lld ms\n", (long long)result.t_total_ms);
+            if (texts.size() > 1) fprintf(stderr, "  (Skipping timing prints for remaining sequences)\n");
+        }
     }
     
-    fprintf(stderr, "Output saved to: %s\n", output_file.c_str());
-    fprintf(stderr, "Audio duration: %.2f seconds\n", 
-            (float)result.audio.size() / result.sample_rate);
-    
-    // Print timing
-    if (params.print_timing) {
-        fprintf(stderr, "\nTiming:\n");
-        fprintf(stderr, "  Load:      %6lld ms\n", (long long)result.t_load_ms);
-        fprintf(stderr, "  Tokenize:  %6lld ms\n", (long long)result.t_tokenize_ms);
-        fprintf(stderr, "  Encode:    %6lld ms\n", (long long)result.t_encode_ms);
-        fprintf(stderr, "  Generate:  %6lld ms\n", (long long)result.t_generate_ms);
-        fprintf(stderr, "  Decode:    %6lld ms\n", (long long)result.t_decode_ms);
-        fprintf(stderr, "  Total:     %6lld ms\n", (long long)result.t_total_ms);
-    }
-    
-    return 0;
+    return has_errors ? 1 : 0;
 }

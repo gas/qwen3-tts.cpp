@@ -1,0 +1,33 @@
+Loading models from: models
+  [mem] load/start               rss=80.37 MB  phys=80.37 MB
+Loading TTS model from models/qwen3-tts-0.6b-f16.gguf...
+Tokenizer IDs -> BOS: 151644, EOS: 151645, PAD: 151643, newline: 198, assistant: 77091
+  Text tokenizer loaded: vocab_size=151936 (173 ms)
+  [mem] load/after-tokenizer     rss=124.62 MB  phys=124.62 MB
+  Speaker encoder: deferred (lazy load)
+ggml_cuda_init: found 1 ROCm devices:
+  Device 0: AMD Radeon Graphics, gfx1201 (0x1201), VMM: no, Wave Size: 32
+  TTSTransformer backend: ROCm0
+  TTS transformer loaded: hidden_size=1024, n_layers=28 (541 ms)
+  [mem] load/after-transformer   rss=870.86 MB  phys=870.86 MB
+Loading vocoder from models/qwen3-tts-tokenizer-f16.gguf...
+  AudioTokenizerDecoder backend: ROCm0
+  Vocoder loaded: sample_rate=24000, n_codebooks=16 (116 ms)
+  [mem] load/after-vocoder       rss=870.86 MB  phys=870.86 MB
+All models loaded in 831 ms
+  [mem] load/end                 rss=870.86 MB  phys=870.86 MB
+Synthesizing 2 texts sequentially (Batching API)...
+  Generating frame 0/50 (Active batches: 2)  Generating frame 5/50 (Active batches: 2)  Generating frame 10/50 (Active batches: 2)  Generating frame 15/50 (Active batches: 1)DEBUG Batch[0]: Primeros 15 Codebook IDs del 1er frame: 1995 1159 355 22 1174 1093 625 1814 1058 905 1846 248 1677 889 812 
+DEBUG Batch[1]: Primeros 15 Codebook IDs del 1er frame: 404 386 312 1560 765 1413 1479 1274 1138 259 347 165 1961 683 1589 
+
+Output 1 saved to: output_0.wav (0.94 seconds)
+
+Timing (Sequence 1):
+  Load:           0 ms
+  Tokenize:       0 ms
+  Encode:         0 ms
+  Generate:    5246 ms
+  Decode:       552 ms
+  Total:          0 ms
+  (Skipping timing prints for remaining sequences)
+Output 2 saved to: output_1.wav (1.26 seconds)

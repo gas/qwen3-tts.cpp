@@ -111,6 +111,14 @@ public:
                                       const float * ref_samples, int32_t n_ref_samples,
                                       const tts_params & params = tts_params());
     
+    // Generate a batch of speech from multiple texts with/without voice cloning
+    // texts: list of input texts to synthesize sequentially or in batch
+    // reference_audio: path to reference audio file (optional, empty means no voice cloning)
+    // params: generation parameters
+    std::vector<tts_result> synthesize_batch(const std::vector<std::string> & texts,
+                                             const std::string & reference_audio,
+                                             const tts_params & params = tts_params());
+
     // Set progress callback
     void set_progress_callback(tts_progress_callback_t callback);
     

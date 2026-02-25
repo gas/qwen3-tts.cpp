@@ -160,6 +160,9 @@ bool TextTokenizer::load_from_gguf(struct gguf_context * ctx) {
         newline_token_id_ = find_token("\n");
     }
     
+    // DEBUG:
+    fprintf(stderr, "Tokenizer IDs -> BOS: %d, EOS: %d, PAD: %d, newline: %d, assistant: %d\n", config_.bos_token_id, config_.eos_token_id, config_.pad_token_id, newline_token_id_, assistant_token_id_);
+
     loaded_ = true;
     return true;
 }
@@ -295,38 +298,7 @@ std::vector<int32_t> TextTokenizer::encode_for_tts(const std::string & text) con
         return {};
     }
     
-    // Format: <|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n
-    std::vector<int32_t> tokens;
-    
-    // <|im_start|>
-    tokens.push_back(config_.bos_token_id);
-    
-    // assistant
-    tokens.push_back(assistant_token_id_);
-    
-    // \n
-    tokens.push_back(newline_token_id_);
-    
-    // Encode the text
-    auto text_tokens = encode(text);
-    tokens.insert(tokens.end(), text_tokens.begin(), text_tokens.end());
-    
-    // <|im_end|>
-    tokens.push_back(config_.eos_token_id);
-    
-    // \n
-    tokens.push_back(newline_token_id_);
-    
-    // <|im_start|>
-    tokens.push_back(config_.bos_token_id);
-    
-    // assistant
-    tokens.push_back(assistant_token_id_);
-    
-    // \n
-    tokens.push_back(newline_token_id_);
-    
-    return tokens;
+    return encode(text);
 }
 
 std::string TextTokenizer::decode(const std::vector<int32_t> & tokens) const {

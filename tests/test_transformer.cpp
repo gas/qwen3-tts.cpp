@@ -279,7 +279,7 @@ int main(int argc, char ** argv) {
         std::vector<float> logits_out;
 
         bool ok = transformer.forward_prefill(
-            ref_prefill.data(), prefill_tokens, 0,
+            ref_prefill.data(), prefill_tokens, 1, 0,
             hidden_out, &logits_out);
 
         if (!ok) {

@@ -44,3 +44,20 @@ En la Fase 3 creaste el magnífico `hip_autoregressive_sampler_kernel` in-device
 ## 🏁 Criterio de Éxito
 - Ejecutar un lote de N frases simultáneas con ambos modelos (0.6B y 1.7B).
 - El RTF combinado del lote completo debe demostrar una utilización masiva de las ALUs, bajando drásticamente el tiempo promedio por frase comparado con la inferencia secuencial actual.
+
+-------------------------------------------------------------
+[AMPLIACIÓN ESTRATÉGICA: PREPARACIÓN PARA BACKEND RESIDENTE]
+Para que este esfuerzo de True Batching tenga un impacto real, el objetivo final es que el motor funcione detrás de un servidor HTTP residente.
+
+Para lograrlo, te pido que aísles la lógica de inferencia del archivo main.cpp.
+
+    Crea una API en C++ limpia: En lugar de que el motor lea directamente de argv, refactoriza el generador para que sea una clase o función que acepte un std::vector<std::string> inputs.
+
+    Desacoplamiento: El motor Qwen3-TTS debe inicializarse una vez (cargando los pesos GGUF y la referencia de audio en la VRAM), quedarse en memoria, y exponer un método generate_batch(vector<string>) que devuelva un vector<vector<float>> (los audios generados).
+
+    Al hacer esto, en un futuro cercano (Fase 6) solo tendremos que conectar cpp-httplib a esa función, acumulando las peticiones web en un buffer y pasándoselas a tu motor de lotes en ráfagas.
+
+Prioriza primero que la matemática del Batching en GGML (Padding, Máscara de Atención y Sampler Vectorizado) funcione localmente pasándole un array estático en el código, y luego expondremos el servidor.
+
+------------------------------
+NOTA TECNICA: recuerda el alias 'torch_702' que te da acceso a las librerias rocm 7.0.2 (ya que hace 'module load rocm/7.0.2' y ya carga el entorno virtual '~/.envs/torch_rocm72/bin/activate' con torchaudio, triton, safetensors, etc específicos instalados). Si necesitas instalar algo por pip (dentro de ese entorno) puedes pedirlo.

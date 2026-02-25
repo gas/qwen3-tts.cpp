@@ -1,0 +1,2 @@
+Esta es la primera frase de prueba del nuevo modo por lotes.
+Y esta es la segunda frase, para comprobar que el speaker no se recarga.

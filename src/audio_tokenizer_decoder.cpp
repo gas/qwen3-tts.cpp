@@ -17,8 +17,8 @@ __global__ void hip_snake_activation_kernel_standard(int n, int ne0, int channel
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
         int channel = (i / ne0) % channels;
-        float a = expf(alpha[channel]);
-        float inv_b = expf(-beta[channel]);
+        float a = alpha[channel];
+        float inv_b = 1.0f / beta[channel];
         
         float val = x[i];
         float sin_ax = sinf(a * val);
@@ -637,9 +637,9 @@ struct ggml_tensor * AudioTokenizerDecoder::apply_decoder_block(struct ggml_cont
      int64_t new_seq_len = x_2d->ne[0];
      x = ggml_reshape_3d(ctx, x_2d, new_seq_len, out_channels, 1);
      
-     // Python CausalTransConvNet: left_pad = right_pad = kernel_size - stride
+     // Python CausalTransConvNet: left_pad = 0, right_pad = kernel_size - stride
      int pad = kernel_size - upsample_rate;
-     int left_pad = pad;
+     int left_pad = 0;
      int right_pad = pad;
      int64_t out_seq_len = new_seq_len - left_pad - right_pad;
      

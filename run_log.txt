@@ -1,0 +1,22 @@
+Error: unknown argument: --print-progress
+Usage: ./build/qwen3-tts-cli [options] -m <model_dir> -t <text>
+
+Options:
+  -m, --model <dir>      Model directory (required)
+  -tts, --tts-model <name> TTS GGUF filename (default: qwen3-tts-0.6b-f16.gguf)
+  -t, --text <text>      Text to synthesize (can be specified multiple times)
+  -f, --file <file>      Text file with phrases to synthesize (one per line)
+  -o, --output <file>    Output WAV file prefix/name (default: output)
+  -r, --reference <file> Reference audio for voice cloning
+  --temperature <val>    Sampling temperature (default: 0.9, 0=greedy)
+  --top-k <n>            Top-k sampling (default: 50, 0=disabled)
+  --top-p <val>          Top-p sampling (default: 1.0)
+  --max-tokens <n>       Maximum audio tokens (default: 4096)
+  --repetition-penalty <val> Repetition penalty (default: 1.05)
+  -l, --language <lang>  Language: en,ru,zh,ja,ko,de,fr,es (default: en)
+  -j, --threads <n>      Number of threads (default: 4)
+  -h, --help             Show this help
+
+Example:
+  ./build/qwen3-tts-cli -m ./models -t "Hello, world!" -o hello.wav
+  ./build/qwen3-tts-cli -m ./models -t "Hello!" -r reference.wav -o cloned.wav

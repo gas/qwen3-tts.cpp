@@ -275,6 +275,134 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
     return synthesize_internal(text, speaker_embedding.data(), params, result);
 }
 
+std::vector<tts_result> Qwen3TTS::synthesize_batch(const std::vector<std::string> & texts,
+                                                   const std::string & reference_audio,
+                                                   const tts_params & params) {
+    std::vector<tts_result> results(texts.size());
+    
+    std::vector<float> speaker_embedding(transformer_.get_config().hidden_size, 0.0f);
+    int64_t t_encode_ms_total = 0;
+    
+    if (!reference_audio.empty()) {
+        std::vector<float> ref_samples;
+        int ref_sample_rate;
+        if (!load_audio_file(reference_audio, ref_samples, ref_sample_rate)) {
+            for (auto & res : results) res.error_msg = "Failed to load reference audio: " + reference_audio;
+            return results;
+        }
+        
+        const int target_rate = 24000;
+        if (ref_sample_rate != target_rate) {
+            fprintf(stderr, "Resampling audio from %d Hz to %d Hz...\n", ref_sample_rate, target_rate);
+            std::vector<float> resampled;
+            resample_linear(ref_samples.data(), (int)ref_samples.size(), ref_sample_rate, resampled, target_rate);
+            ref_samples = std::move(resampled);
+        }
+        
+        if (!encoder_loaded_) {
+            if (tts_model_path_.empty()) {
+                for (auto & res : results) res.error_msg = "Internal error: missing TTS model path";
+                return results;
+            }
+            int64_t t_encoder_load_start = get_time_ms();
+            if (!audio_encoder_.load_model(tts_model_path_)) {
+                for (auto & res : results) res.error_msg = "Failed to load speaker encoder: " + audio_encoder_.get_error();
+                return results;
+            }
+            encoder_loaded_ = true;
+            if (params.print_timing) {
+                fprintf(stderr, "  Speaker encoder lazy-loaded in %lld ms\n",
+                        (long long)(get_time_ms() - t_encoder_load_start));
+                log_memory_usage("voice/after-encoder-load");
+            }
+        }
+        
+        int64_t t_encode_start = get_time_ms();
+        if (!audio_encoder_.encode(ref_samples.data(), (int32_t)ref_samples.size(), speaker_embedding)) {
+            for (auto & res : results) res.error_msg = "Failed to extract speaker embedding: " + audio_encoder_.get_error();
+            return results;
+        }
+        t_encode_ms_total = get_time_ms() - t_encode_start;
+        
+        if (params.print_progress) {
+            fprintf(stderr, "Speaker embedding extracted: %zu floats\n", speaker_embedding.size());
+        }
+    }
+    
+    // TRUE BATCH INVOCATION (Replaces iterative processing)
+    if (params.print_progress) {
+        fprintf(stderr, "Pre-tokenizing batch of %zu sequences...\n", texts.size());
+    }
+
+    std::vector<std::vector<int32_t>> all_text_tokens(texts.size());
+    for (size_t i = 0; i < texts.size(); ++i) {
+        all_text_tokens[i] = tokenizer_.encode_for_tts(texts[i]);
+    }
+
+    std::vector<std::vector<int32_t>> all_speech_codes(texts.size());
+    int64_t t_generate_start = get_time_ms();
+    
+    if (!transformer_loaded_) {
+        if (!transformer_.load_model(tts_model_path_)) {
+            for (auto & res : results) res.error_msg = "Failed to load TTS transformer: " + transformer_.get_error();
+            return results;
+        }
+        transformer_loaded_ = true;
+    }
+    transformer_.clear_kv_cache();
+
+    if (!transformer_.generate_batch(all_text_tokens, reference_audio.empty() ? nullptr : speaker_embedding.data(), params.max_audio_tokens,
+                                     all_speech_codes, params.language_id, params.repetition_penalty,
+                                     params.temperature, params.top_k)) {
+        for (auto & res : results) res.error_msg = "Failed to generate batch speech codes: " + transformer_.get_error();
+        return results;
+    }
+    int64_t t_generate_ms = get_time_ms() - t_generate_start;
+    
+    int n_codebooks = transformer_.get_config().n_codebooks;
+
+    // Decode batch to independent wav samples 
+    for (size_t i = 0; i < texts.size(); ++i) {
+        results[i].t_generate_ms = t_generate_ms / texts.size(); // Proxy Average 
+        if (!reference_audio.empty()) results[i].t_encode_ms = t_encode_ms_total;
+        
+        int n_frames = (int)all_speech_codes[i].size() / n_codebooks;
+        if (n_frames == 0) continue;
+        
+        // DEBUG: Imprimir primeros frames crudos extraidos por el vocoder
+        fprintf(stderr, "DEBUG Batch[%zu]: Primeros 15 Codebook IDs del 1er frame: ", i);
+        for(int d=0; d < std::min(15, (int)all_speech_codes[i].size()); d++) {
+            fprintf(stderr, "%d ", all_speech_codes[i][d]);
+        }
+        fprintf(stderr, "\n");
+
+        int64_t t_decode_start = get_time_ms();
+        if (!decoder_loaded_) {
+            if (!audio_decoder_.load_model(decoder_model_path_)) {
+                results[i].error_msg = "Failed to load vocoder: " + audio_decoder_.get_error();
+                continue;
+            }
+            decoder_loaded_ = true;
+        }
+        
+        if (!audio_decoder_.decode(all_speech_codes[i].data(), n_frames, results[i].audio)) {
+             results[i].error_msg = "Failed to decode speech codes: " + audio_decoder_.get_error();
+        }
+        results[i].t_decode_ms = get_time_ms() - t_decode_start;
+        results[i].sample_rate = audio_decoder_.get_config().sample_rate;
+        results[i].success = true;
+    }
+    
+    if (low_mem_mode_) {
+        audio_decoder_.unload_model();
+        decoder_loaded_ = false;
+        transformer_.unload_model();
+        transformer_loaded_ = false;
+    }
+    
+    return results;
+}
+
 tts_result Qwen3TTS::synthesize_internal(const std::string & text,
                                           const float * speaker_embedding,
                                           const tts_params & params,
