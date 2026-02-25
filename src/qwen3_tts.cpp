@@ -369,12 +369,6 @@ std::vector<tts_result> Qwen3TTS::synthesize_batch(const std::vector<std::string
         int n_frames = (int)all_speech_codes[i].size() / n_codebooks;
         if (n_frames == 0) continue;
         
-        // DEBUG: Imprimir primeros frames crudos extraidos por el vocoder
-        fprintf(stderr, "DEBUG Batch[%zu]: Primeros 15 Codebook IDs del 1er frame: ", i);
-        for(int d=0; d < std::min(15, (int)all_speech_codes[i].size()); d++) {
-            fprintf(stderr, "%d ", all_speech_codes[i][d]);
-        }
-        fprintf(stderr, "\n");
 
         int64_t t_decode_start = get_time_ms();
         if (!decoder_loaded_) {
