@@ -10,6 +10,9 @@ models/*.gguf
 models/Qwen3-TTS-*/
 models/coreml/
 
+# interno
+.docs/
+
 # Reference outputs (generated)
 reference/*.bin
 reference/*.wav
@@ -48,6 +51,7 @@ Thumbs.db
 debug_*.bin
 reference/decoder_debug/
 reference/debug/
+logs/
 # ggml/
 hipThreads repo exmples
 hipThreads_README.md

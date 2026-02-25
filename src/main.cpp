@@ -20,6 +20,7 @@ void print_usage(const char * program) {
     fprintf(stderr, "  --max-tokens <n>       Maximum audio tokens (default: 4096)\n");
     fprintf(stderr, "  --repetition-penalty <val> Repetition penalty (default: 1.05)\n");
     fprintf(stderr, "  -l, --language <lang>  Language: en,ru,zh,ja,ko,de,fr,es (default: en)\n");
+    fprintf(stderr, "  -b, --batch-size <n>   Max batch size for chunking (default: 16)\n");
     fprintf(stderr, "  -j, --threads <n>      Number of threads (default: 4)\n");
     fprintf(stderr, "  -h, --help             Show this help\n");
     fprintf(stderr, "\n");
@@ -37,6 +38,8 @@ int main(int argc, char ** argv) {
     std::string tts_model_name;
     
     qwen3_tts::tts_params params;
+    
+    int chunk_size = 16;
     
     // Parse arguments
     for (int i = 1; i < argc; i++) {
@@ -137,6 +140,12 @@ int main(int argc, char ** argv) {
                 return 1;
             }
             params.n_threads = std::stoi(argv[i]);
+        } else if (arg == "-b" || arg == "--batch-size") {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: missing batch-size value\n");
+                return 1;
+            }
+            chunk_size = std::stoi(argv[i]);
         } else {
             fprintf(stderr, "Error: unknown argument: %s\n", arg.c_str());
             print_usage(argv[0]);
@@ -186,59 +195,67 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "\rGenerating: %d/%d tokens", tokens, max_tokens);
     });
     
-    // Generate speech
-    std::vector<qwen3_tts::tts_result> results;
-    
-    if (reference_audio.empty()) {
-        fprintf(stderr, "Synthesizing %zu texts sequentially (Batching API)...\n", texts.size());
-        results = tts.synthesize_batch(texts, "", params);
-    } else {
-        fprintf(stderr, "Synthesizing %zu texts with voice cloning (Batching API)...\n", texts.size());
-        fprintf(stderr, "Reference audio: %s\n", reference_audio.c_str());
-        results = tts.synthesize_batch(texts, reference_audio, params);
-    }
-    
-    fprintf(stderr, "\n");
-    
-    // Save outputs
+    // Generate speech in chunks
     bool has_errors = false;
-    for (size_t i = 0; i < results.size(); ++i) {
-        const auto & result = results[i];
-        if (!result.success) {
-            fprintf(stderr, "Error in sequence %zu: %s\n", i + 1, result.error_msg.c_str());
-            has_errors = true;
-            continue;
+    
+    for (size_t i = 0; i < texts.size(); i += chunk_size) {
+        size_t end_idx = std::min(i + chunk_size, texts.size());
+        std::vector<std::string> chunk_texts(texts.begin() + i, texts.begin() + end_idx);
+        
+        size_t original_chunk_size = chunk_texts.size();
+        while (chunk_texts.size() < (size_t)chunk_size) {
+            chunk_texts.push_back(chunk_texts.back());
         }
         
-        std::string current_output_file = output_file;
-        if (texts.size() > 1) {
-            size_t dot_pos = output_file.find_last_of('.');
-            if (dot_pos == std::string::npos) {
-                current_output_file = output_file + "_" + std::to_string(i) + ".wav";
-            } else {
-                current_output_file = output_file.substr(0, dot_pos) + "_" + std::to_string(i) + output_file.substr(dot_pos);
+        fprintf(stderr, "\nProcessing batch chunk %zu/%zu (texts %zu to %zu)...\n", 
+                (i / chunk_size) + 1, (texts.size() + chunk_size - 1) / chunk_size, i + 1, end_idx);
+        
+        std::vector<qwen3_tts::tts_result> chunk_results;
+        if (reference_audio.empty()) {
+            chunk_results = tts.synthesize_batch(chunk_texts, "", params);
+        } else {
+            chunk_results = tts.synthesize_batch(chunk_texts, reference_audio, params);
+        }
+        
+        // Save chunk outputs immediately
+        for (size_t j = 0; j < original_chunk_size; ++j) {
+            size_t global_idx = i + j;
+            const auto & result = chunk_results[j];
+            if (!result.success) {
+                fprintf(stderr, "Error in sequence %zu: %s\n", global_idx + 1, result.error_msg.c_str());
+                has_errors = true;
+                continue;
             }
-        }
-        
-        if (!qwen3_tts::save_audio_file(current_output_file, result.audio, result.sample_rate)) {
-            fprintf(stderr, "Error: failed to save output file: %s\n", current_output_file.c_str());
-            has_errors = true;
-            continue;
-        }
-        
-        fprintf(stderr, "Output %zu saved to: %s (%.2f seconds)\n", 
-                i + 1, current_output_file.c_str(), (float)result.audio.size() / result.sample_rate);
-                
-        // Print timing for the first one as representative, or print all if requested
-        if (params.print_timing && i == 0) {
-            fprintf(stderr, "\nTiming (Sequence 1):\n");
-            fprintf(stderr, "  Load:      %6lld ms\n", (long long)result.t_load_ms);
-            fprintf(stderr, "  Tokenize:  %6lld ms\n", (long long)result.t_tokenize_ms);
-            fprintf(stderr, "  Encode:    %6lld ms\n", (long long)result.t_encode_ms);
-            fprintf(stderr, "  Generate:  %6lld ms\n", (long long)result.t_generate_ms);
-            fprintf(stderr, "  Decode:    %6lld ms\n", (long long)result.t_decode_ms);
-            fprintf(stderr, "  Total:     %6lld ms\n", (long long)result.t_total_ms);
-            if (texts.size() > 1) fprintf(stderr, "  (Skipping timing prints for remaining sequences)\n");
+            
+            std::string current_output_file = output_file;
+            if (texts.size() > 1) {
+                size_t dot_pos = output_file.find_last_of('.');
+                if (dot_pos == std::string::npos) {
+                    current_output_file = output_file + "_" + std::to_string(global_idx) + ".wav";
+                } else {
+                    current_output_file = output_file.substr(0, dot_pos) + "_" + std::to_string(global_idx) + output_file.substr(dot_pos);
+                }
+            }
+            
+            if (!qwen3_tts::save_audio_file(current_output_file, result.audio, result.sample_rate)) {
+                fprintf(stderr, "Error: failed to save output file: %s\n", current_output_file.c_str());
+                has_errors = true;
+                continue;
+            }
+            
+            fprintf(stderr, "Output %zu saved to: %s (%.2f seconds)\n", 
+                    global_idx + 1, current_output_file.c_str(), (float)result.audio.size() / result.sample_rate);
+                    
+            if (params.print_timing && global_idx == 0) {
+                fprintf(stderr, "\nTiming (Sequence 1):\n");
+                fprintf(stderr, "  Load:      %6lld ms\n", (long long)result.t_load_ms);
+                fprintf(stderr, "  Tokenize:  %6lld ms\n", (long long)result.t_tokenize_ms);
+                fprintf(stderr, "  Encode:    %6lld ms\n", (long long)result.t_encode_ms);
+                fprintf(stderr, "  Generate:  %6lld ms\n", (long long)result.t_generate_ms);
+                fprintf(stderr, "  Decode:    %6lld ms\n", (long long)result.t_decode_ms);
+                fprintf(stderr, "  Total:     %6lld ms\n", (long long)result.t_total_ms);
+                if (texts.size() > 1) fprintf(stderr, "  (Skipping timing prints for remaining sequences)\n");
+            }
         }
     }
     

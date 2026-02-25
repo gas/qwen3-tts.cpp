@@ -13,6 +13,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
 endif()
 set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -fgpu-rdc")
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Timing instrumentation option
 option(QWEN3_TTS_TIMING "Enable detailed timing instrumentation" OFF)
@@ -154,6 +155,27 @@ target_link_libraries(qwen3_tts PUBLIC
     roc::rocthrust
 )
 
+# Qwen3 TTS Dynamic Library (C API)
+add_library(qwen3_tts_shared SHARED
+    src/qwen3_tts_c_api.cpp
+)
+set_source_files_properties(src/qwen3_tts_c_api.cpp PROPERTIES LANGUAGE HIP)
+set_target_properties(qwen3_tts_shared PROPERTIES 
+    OUTPUT_NAME "qwen3-tts"
+    HIP_SEPARABLE_COMPILATION ON
+    LINKER_LANGUAGE HIP
+    POSITION_INDEPENDENT_CODE ON
+)
+target_compile_definitions(qwen3_tts_shared PRIVATE QWEN3_TTS_SHARED)
+target_include_directories(qwen3_tts_shared PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${GGML_DIR}/include
+)
+target_link_libraries(qwen3_tts_shared PRIVATE
+    qwen3_tts
+)
+
 # CLI executable
 add_executable(qwen3-tts-cli
     src/main.cpp
@@ -164,6 +186,22 @@ set_target_properties(qwen3-tts-cli PROPERTIES
     LINKER_LANGUAGE HIP
 )
 target_link_libraries(qwen3-tts-cli PRIVATE
+    qwen3_tts
+)
+
+# HTTP Server executable
+add_executable(qwen3-tts-server
+    src/server.cpp
+)
+set_source_files_properties(src/server.cpp PROPERTIES LANGUAGE HIP)
+set_target_properties(qwen3-tts-server PROPERTIES 
+    HIP_SEPARABLE_COMPILATION ON
+    LINKER_LANGUAGE HIP
+)
+target_include_directories(qwen3-tts-server PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps
+)
+target_link_libraries(qwen3-tts-server PRIVATE
     qwen3_tts
 )
 

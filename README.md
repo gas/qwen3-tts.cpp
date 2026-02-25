@@ -10,11 +10,13 @@ Runs the full TTS pipeline in pure C++17, including text tokenization, speaker e
 
 ## Features
 
-- Full text-to-speech pipeline in C++17 with GGML backend
+- Full text-to-speech pipeline in C++17 with GGML/HIP backend
 - Voice cloning from reference audio (ECAPA-TDNN x-vector extraction)
+- True OOM-safe asynchronous batch generation (with auto-chunking limits)
+- Native REST HTTP Server (`qwen3-tts-server`)
+- C API Shared Library (`libqwen3-tts.so`) for Python/Go dynamic linking
 - Greedy and sampled decoding (temperature, top-k, repetition penalty)
 - GGUF model format (F16 and Q8_0 quantization)
-- Runtime backend selection with GPU/Metal preference and CPU fallback
 - Deterministic reference tests comparing C++ output against Python
 - Compile-time timing instrumentation with zero overhead in normal builds
 
@@ -161,10 +163,30 @@ Place both `.gguf` files in a `models/` directory.
 # Voice cloning from reference audio
 ./build/qwen3-tts-cli -m models -t "Hello! How are you?" -r reference.wav -o cloned.wav
 
+# Mass Batch Generation (Safe Chunking)
+# Reads lines from input.txt and processes them in batches of 16 to avoid VRAM OOM
+./build/qwen3-tts-cli -m models -f input.txt -b 16 -o batch_output.wav
+
 # Greedy decoding with max length
 ./build/qwen3-tts-cli -m models -t "Hello!" -r ref.wav -o out.wav \
     --temperature 0 --max-tokens 2048
 ```
+
+### Server API (REST)
+
+You can launch `qwen3-tts-server` to expose a stateless JSON API generating base64 audio over the network.
+```bash
+./build/qwen3-tts-server --model ./models -p 8080
+```
+```bash
+curl -X POST http://localhost:8080/v1/audio/generations \
+  -H "Content-Type: application/json" \
+  -d '{"input": ["Sentence 1", "Sentence 2"], "language": "en"}'
+```
+
+### Shared Library (C API)
+
+The build process produces a dynamic library `libqwen3-tts.so` (or `.dylib` / `.dll`). You can load this directly into Python via `ctypes` without spawning sub-processes. See `test_api.py` for a working implementation example.
 
 ### CLI Options
 
@@ -172,8 +194,10 @@ Place both `.gguf` files in a `models/` directory.
 |------|-------------|---------|
 | `-m, --model <dir>` | Model directory containing GGUF files | (required) |
 | `-t, --text <text>` | Text to synthesize | (required) |
+| `-f, --file <file>` | Text file containing inputs separated by line | (none) |
 | `-o, --output <file>` | Output WAV file path | `output.wav` |
 | `-r, --reference <file>` | Reference audio for voice cloning | (none) |
+| `-b, --batch-size <n>` | Max chunking limit for batch processes | 16 |
 | `--temperature <val>` | Sampling temperature (0 = greedy) | 0.9 |
 | `--top-k <n>` | Top-k sampling (0 = disabled) | 50 |
 | `--top-p <val>` | Top-p sampling | 1.0 |

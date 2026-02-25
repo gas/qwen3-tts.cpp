@@ -1392,7 +1392,7 @@ struct ggml_cgraph * TTSTransformer::build_step_graph(int32_t n_past, int32_t ba
         struct ggml_tensor * v_cache = state_.cache.v_cache[il];
         
         int batch_size = k_cache->ne[3];
-        
+
         struct ggml_tensor * k_cache_view = ggml_view_4d(ctx0, k_cache,
             head_dim, n_kv_head, n_tokens, batch_size,
             k_cache->nb[1], k_cache->nb[2], k_cache->nb[3],
@@ -1872,7 +1872,7 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(int32_t n_past, 
         
         struct ggml_tensor * k_cache = state_.code_pred_cache.k_cache[il];
         struct ggml_tensor * v_cache = state_.code_pred_cache.v_cache[il];
-        
+
         int batch_size = k_cache->ne[3];
 
         struct ggml_tensor * k_cache_view = ggml_view_4d(ctx0, k_cache,
