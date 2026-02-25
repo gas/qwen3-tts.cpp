@@ -298,7 +298,22 @@ std::vector<int32_t> TextTokenizer::encode_for_tts(const std::string & text) con
         return {};
     }
     
-    return encode(text);
+    std::vector<int32_t> tokens;
+    
+    // <|im_start|>
+    tokens.push_back(config_.bos_token_id);
+    
+    // assistant
+    tokens.push_back(assistant_token_id_);
+    
+    // \n
+    tokens.push_back(newline_token_id_);
+    
+    // Encode the text
+    auto text_tokens = encode(text);
+    tokens.insert(tokens.end(), text_tokens.begin(), text_tokens.end());
+    
+    return tokens;
 }
 
 std::string TextTokenizer::decode(const std::vector<int32_t> & tokens) const {
