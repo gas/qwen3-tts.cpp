@@ -1113,7 +1113,7 @@ bool TTSTransformer::build_prefill_graph(const int32_t * text_tokens, int32_t n_
     }
 
     std::vector<float> first_text_embed;
-    if (!project_text_tokens(text_tokens, 1, first_text_embed)) {
+    if (!project_text_tokens(text_tokens + 3, 1, first_text_embed)) {
         return false;
     }
 
@@ -1138,10 +1138,10 @@ bool TTSTransformer::build_prefill_graph(const int32_t * text_tokens, int32_t n_
     // 3. first_text_plus_codec_bos (1)
     memcpy(prefill_embd.data() + offset * hidden_size, first_text_plus_codec_bos.data(), 1 * hidden_size * sizeof(float));
 
-    const int32_t trailing_token_count = std::max(0, n_tokens - 1);
+    const int32_t trailing_token_count = std::max(0, n_tokens - 4);
     std::vector<float> trailing_text_proj;
     if (trailing_token_count > 0) {
-        if (!project_text_tokens(text_tokens + 1, trailing_token_count, trailing_text_proj)) {
+        if (!project_text_tokens(text_tokens + 4, trailing_token_count, trailing_text_proj)) {
             return false;
         }
     }
