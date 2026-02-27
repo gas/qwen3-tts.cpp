@@ -17,6 +17,8 @@ reference/debug/
 
 # interno
 logs/
+.docs/
+.test/
 
 # Test outputs
 test_output/
