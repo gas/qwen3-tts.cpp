@@ -15,6 +15,9 @@ reference/*.bin
 reference/*.wav
 reference/debug/
 
+# interno
+logs/
+
 # Test outputs
 test_output/
 test_results.txt
