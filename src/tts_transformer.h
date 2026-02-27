@@ -10,6 +10,7 @@
 #include <vector>
 #include <memory>
 #include <random>
+#include <functional>
 #ifdef QWEN3_TTS_TIMING
 #include <chrono>
 #endif
@@ -201,6 +202,8 @@ public:
     TTSTransformer();
     ~TTSTransformer();
     
+    std::function<void(int, int)> progress_callback_ = nullptr;
+
     // Load model from GGUF file
     bool load_model(const std::string & model_path);
 

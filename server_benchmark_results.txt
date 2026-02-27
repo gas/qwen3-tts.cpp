@@ -1,0 +1,29 @@
+Starting Qwen3-TTS Server...
+Waiting for server to load models and become healthy...
+Server is up and running!
+
+--- 1. Cold Start Inference (Initial Load) ---
+[Cold Start] Sending request...
+[Cold Start] Completed in 49.835 seconds.
+
+--- 2. Warm Start Inference (Subsequent Request) ---
+[Warm Start] Sending request...
+[Warm Start] Completed in 45.174 seconds.
+
+--- 3. Concurrent Requests (4 clients) ---
+Firing requests simultaneously...
+
+
+==================================================
+SERVER BENCHMARK SUMMARY
+==================================================
+Cold Start Time:     49.835 s
+Warm Start Time:     45.174 s
+
+Concurrency Test (4 requests):
+Total Wall Time:     94.565 s
+Average Turnaround:  59.147 s per client
+Note: The server uses a mutex on the engine, so wall time scales linearly.
+      Turnaround measures queue waiting time for each client.
+
+Shutting down server...

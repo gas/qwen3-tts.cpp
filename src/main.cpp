@@ -13,7 +13,7 @@ void print_usage(const char * program) {
     fprintf(stderr, "  -t, --text <text>      Text to synthesize (can be specified multiple times)\n");
     fprintf(stderr, "  -f, --file <file>      Text file with phrases to synthesize (one per line)\n");
     fprintf(stderr, "  -o, --output <file>    Output WAV file prefix/name (default: output)\n");
-    fprintf(stderr, "  -r, --reference <file> Reference audio for voice cloning\n");
+    fprintf(stderr, "  -r, --reference <file> Reference audio or .q3vp file (audiocodes) for voice cloning\n");
     fprintf(stderr, "  -p, --ref-text <text>  Reference text transcript for voice cloning\n");
     fprintf(stderr, "  -x, --x-vector-only    Disable ICL acoustic codes when loading .q3vp voice profiles\n");
     fprintf(stderr, "  --temperature <val>    Sampling temperature (default: 0.9, 0=greedy)\n");
@@ -193,7 +193,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
     
-    if (reference_text.empty() && !reference_audio.empty()) {
+    if (!x_vector_only && reference_text.empty() && !reference_audio.empty()) {
         std::string txt_path = reference_audio;
         size_t dot_pos = txt_path.find_last_of('.');
         if (dot_pos != std::string::npos) {
@@ -303,6 +303,13 @@ int main(int argc, char ** argv) {
                 fprintf(stderr, "  Generate:  %6lld ms\n", (long long)result.t_generate_ms);
                 fprintf(stderr, "  Decode:    %6lld ms\n", (long long)result.t_decode_ms);
                 fprintf(stderr, "  Total:     %6lld ms\n", (long long)result.t_total_ms);
+                
+                double audio_sec = result.sample_rate > 0 ? (double)result.audio.size() / result.sample_rate : 0.0;
+                double wall_sec = (double)result.t_total_ms / 1000.0;
+                double realtime_factor = audio_sec > 0.0 ? wall_sec / audio_sec : 0.0;
+                fprintf(stderr, "  RTF:           %.3f\n", realtime_factor);
+                fprintf(stderr, "  RSS peak:      %.2f MB\n", result.mem_rss_peak_bytes / (1024.0 * 1024.0));
+                
                 if (texts.size() > 1) fprintf(stderr, "  (Skipping timing prints for remaining sequences)\n");
             }
         }

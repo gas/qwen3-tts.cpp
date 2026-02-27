@@ -3117,6 +3117,12 @@ bool TTSTransformer::generate_batch(const std::vector<std::vector<int32_t>> & in
         error_msg_ = "Model not loaded";
         return false;
     }
+#ifdef QWEN3_TTS_TIMING
+    using clk = std::chrono::high_resolution_clock;
+    auto t_gen_start = clk::now();
+    tts_timing timing;
+    timing_ = &timing;
+#endif
     
     int32_t batch_size = texts_tokens.size();
     if (batch_size == 0) return true;
@@ -3272,7 +3278,9 @@ bool TTSTransformer::generate_batch(const std::vector<std::vector<int32_t>> & in
     for (int frame = 0; frame < max_len; ++frame) {
         if (active_batches == 0) break;
         
-        if (frame % 5 == 0 || frame == max_len - 1) {
+        if (progress_callback_) {
+            progress_callback_(frame, max_len);
+        } else if (frame % 5 == 0 || frame == max_len - 1) {
             fprintf(stderr, "\r  Generating frame %d/%d (Active batches: %d)", frame, max_len, active_batches);
         }
 
@@ -3359,6 +3367,51 @@ bool TTSTransformer::generate_batch(const std::vector<std::vector<int32_t>> & in
         
         current_step_codes = std::move(step_codes);
     }
+
+#ifdef QWEN3_TTS_TIMING
+    timing.n_frames = max_len;
+    timing.t_generate_total_ms = std::chrono::duration<double, std::milli>(clk::now() - t_gen_start).count();
+    timing_ = nullptr;
+    const auto & t = timing;
+    int nf = t.n_frames;
+    fprintf(stderr, "\n=== Detailed Generation Timing (%d frames) ===\n", nf);
+    fprintf(stderr, "\n  Prefill:\n");
+    fprintf(stderr, "    Build graph:      %8.1f ms\n", t.t_prefill_build_ms);
+    fprintf(stderr, "    Forward total:    %8.1f ms\n", t.t_prefill_forward_ms);
+    fprintf(stderr, "      Graph build:    %8.1f ms\n", t.t_prefill_graph_build_ms);
+    fprintf(stderr, "      Graph alloc:    %8.1f ms\n", t.t_prefill_graph_alloc_ms);
+    fprintf(stderr, "      Compute:        %8.1f ms\n", t.t_prefill_compute_ms);
+    fprintf(stderr, "      Data I/O:       %8.1f ms\n", t.t_prefill_data_ms);
+    fprintf(stderr, "\n  Talker forward_step (total / per-frame):\n");
+    fprintf(stderr, "    Total:            %8.1f ms   (%.1f ms/frame)\n", t.t_talker_forward_ms, nf > 0 ? t.t_talker_forward_ms / nf : 0.0);
+    fprintf(stderr, "      Graph build:    %8.1f ms   (%.1f ms/frame)\n", t.t_talker_graph_build_ms, nf > 0 ? t.t_talker_graph_build_ms / nf : 0.0);
+    fprintf(stderr, "      Graph alloc:    %8.1f ms   (%.1f ms/frame)\n", t.t_talker_graph_alloc_ms, nf > 0 ? t.t_talker_graph_alloc_ms / nf : 0.0);
+    fprintf(stderr, "      Compute:        %8.1f ms   (%.1f ms/frame)\n", t.t_talker_compute_ms, nf > 0 ? t.t_talker_compute_ms / nf : 0.0);
+    fprintf(stderr, "      Data I/O:       %8.1f ms   (%.1f ms/frame)\n", t.t_talker_data_ms, nf > 0 ? t.t_talker_data_ms / nf : 0.0);
+    fprintf(stderr, "\n  Code predictor (total / per-frame):\n");
+    fprintf(stderr, "    Backend:          %s\n", use_coreml_code_predictor_ ? "CoreML (CPU+NE)" : "GGML");
+    if (use_coreml_code_predictor_ && !coreml_code_predictor_path_.empty()) {
+        fprintf(stderr, "    CoreML model:     %s\n", coreml_code_predictor_path_.c_str());
+    }
+    fprintf(stderr, "    Total:            %8.1f ms   (%.1f ms/frame)\n", t.t_code_pred_ms, nf > 0 ? t.t_code_pred_ms / nf : 0.0);
+    fprintf(stderr, "      Init/KV/embed:  %8.1f ms   (%.1f ms/frame)\n", t.t_code_pred_init_ms, nf > 0 ? t.t_code_pred_init_ms / nf : 0.0);
+    fprintf(stderr, "      Prefill (2tok): %8.1f ms   (%.1f ms/frame)\n", t.t_code_pred_prefill_ms, nf > 0 ? t.t_code_pred_prefill_ms / nf : 0.0);
+    fprintf(stderr, "      Steps (14):     %8.1f ms   (%.1f ms/frame)\n", t.t_code_pred_steps_ms, nf > 0 ? t.t_code_pred_steps_ms / nf : 0.0);
+    fprintf(stderr, "      Graph build:    %8.1f ms   (%.1f ms/frame)\n", t.t_code_pred_graph_build_ms, nf > 0 ? t.t_code_pred_graph_build_ms / nf : 0.0);
+    fprintf(stderr, "      Graph alloc:    %8.1f ms   (%.1f ms/frame)\n", t.t_code_pred_graph_alloc_ms, nf > 0 ? t.t_code_pred_graph_alloc_ms / nf : 0.0);
+    fprintf(stderr, "      Compute:        %8.1f ms   (%.1f ms/frame)\n", t.t_code_pred_compute_ms, nf > 0 ? t.t_code_pred_compute_ms / nf : 0.0);
+    fprintf(stderr, "      Data I/O:       %8.1f ms   (%.1f ms/frame)\n", t.t_code_pred_data_ms, nf > 0 ? t.t_code_pred_data_ms / nf : 0.0);
+    fprintf(stderr, "      CoreML total:   %8.1f ms   (%.1f ms/frame)\n", t.t_code_pred_coreml_ms, nf > 0 ? t.t_code_pred_coreml_ms / nf : 0.0);
+    fprintf(stderr, "\n  Embed lookups:      %8.1f ms   (%.1f ms/frame)\n", t.t_embed_lookup_ms, nf > 0 ? t.t_embed_lookup_ms / nf : 0.0);
+    double accounted = t.t_prefill_build_ms + t.t_prefill_forward_ms + t.t_talker_forward_ms + t.t_code_pred_ms + t.t_embed_lookup_ms;
+    fprintf(stderr, "  Other/overhead:     %8.1f ms\n", t.t_generate_total_ms - accounted);
+    fprintf(stderr, "  ─────────────────────────────────────────\n");
+    fprintf(stderr, "  Total generate:     %8.1f ms\n", t.t_generate_total_ms);
+    if (nf > 0) {
+        fprintf(stderr, "  Throughput:         %8.1f ms/frame (%.1f frames/s)\n",
+                t.t_generate_total_ms / nf, 1000.0 * nf / t.t_generate_total_ms);
+    }
+#endif
 
     return true;
 }

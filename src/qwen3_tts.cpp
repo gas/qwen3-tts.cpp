@@ -299,6 +299,10 @@ std::vector<tts_result> Qwen3TTS::synthesize_batch(const std::vector<std::string
                                                    const std::string & reference_text,
                                                    bool x_vector_only,
                                                    const tts_params & params) {
+    int64_t t_batch_total_start = get_time_ms();
+    process_memory_snapshot mem_start;
+    get_process_memory_snapshot(mem_start);
+    
     std::vector<tts_result> results(texts.size());
     
     std::vector<float> speaker_embedding(transformer_.get_config().hidden_size, 0.0f);
@@ -317,15 +321,12 @@ std::vector<tts_result> Qwen3TTS::synthesize_batch(const std::vector<std::string
             return results;
         }
         
-        const std::vector<int32_t>* codes_ptr = x_vector_only ? nullptr : &profile.audio_codes;
-
-        for (size_t i = 0; i < texts.size(); ++i) {
-            synthesize_internal(texts[i], reference_text, profile.speaker_embedding.data(), codes_ptr, params, results[i]);
+        speaker_embedding = profile.speaker_embedding;
+        if (!x_vector_only) {
+            audio_codes = profile.audio_codes;
+            has_audio_codes = true;
         }
-        return results;
-    }
-    
-    if (!reference_audio.empty()) {
+    } else if (!reference_audio.empty()) {
         std::vector<float> ref_samples;
         int ref_sample_rate;
         if (!load_audio_file(reference_audio, ref_samples, ref_sample_rate)) {
@@ -394,6 +395,7 @@ std::vector<tts_result> Qwen3TTS::synthesize_batch(const std::vector<std::string
         transformer_loaded_ = true;
     }
     transformer_.clear_kv_cache();
+    transformer_.progress_callback_ = progress_callback_;
 
     if (!transformer_.generate_batch(all_instruct_tokens, all_text_tokens, 
                                      reference_audio.empty() ? nullptr : speaker_embedding.data(),
@@ -432,6 +434,11 @@ std::vector<tts_result> Qwen3TTS::synthesize_batch(const std::vector<std::string
         results[i].t_decode_ms = get_time_ms() - t_decode_start;
         results[i].sample_rate = audio_decoder_.get_config().sample_rate;
         results[i].success = true;
+        
+        process_memory_snapshot mem_end;
+        get_process_memory_snapshot(mem_end);
+        results[i].mem_rss_peak_bytes = mem_end.rss_bytes > mem_start.rss_bytes ? mem_end.rss_bytes : mem_start.rss_bytes;
+        results[i].t_total_ms = get_time_ms() - t_batch_total_start;
     }
     
     if (low_mem_mode_) {
@@ -482,10 +489,12 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
     std::vector<int32_t> instruct_tokens;
     if (!reference_text.empty()) {
         instruct_tokens = tokenizer_.encode(reference_text);
-        fprintf(stderr, "ICL Reference Tokens length: %zu\n", instruct_tokens.size());
-        fprintf(stderr, "ICL Reference Tokens: ");
-        for (auto t : instruct_tokens) fprintf(stderr, "%d ", t);
-        fprintf(stderr, "\n");
+        if (params.print_progress) {
+            fprintf(stderr, "ICL Reference Tokens length: %zu\n", instruct_tokens.size());
+            fprintf(stderr, "ICL Reference Tokens: ");
+            for (auto t : instruct_tokens) fprintf(stderr, "%d ", t);
+            fprintf(stderr, "\n");
+        }
     }
     std::vector<int32_t> text_tokens = tokenizer_.encode_for_tts(text);
     result.t_tokenize_ms = get_time_ms() - t_tokenize_start;

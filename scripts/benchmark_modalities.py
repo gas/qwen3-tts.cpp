@@ -28,7 +28,7 @@ def run_command(cmd, name):
     stderr = result.stderr
     
     # Try to find memory peak
-    rss_peak_match = re.search(r"RSS peak:\s+([\d.]+ \w+)", stderr)
+    rss_peak_match = re.search(r"RSS peak:\s+([\d.]+ MB)", stderr)
     rss_peak = rss_peak_match.group(1) if rss_peak_match else "N/A"
     
     # Find timing stats
@@ -38,7 +38,7 @@ def run_command(cmd, name):
     gen_match = re.search(r"Generate:\s+(\d+) ms", stderr)
     gen_time = gen_match.group(1) if gen_match else "N/A"
     
-    rtf_match = re.search(r"RTF=([\d.]+)", stderr)
+    rtf_match = re.search(r"RTF:\s+([\d.]+)", stderr)
     rtf = rtf_match.group(1) if rtf_match else "N/A"
     
     ttft_match = re.search(r"Prefill \(.*?\):\s+([\d.]+) ms", stderr)
@@ -68,20 +68,26 @@ def main():
         
     results = []
     
-    # 1. Zero-shot baseline
-    cmd1 = [CLI_PATH, "-m", MODEL_DIR, "-tts", TTS_MODEL, "-t", TEST_TEXT, "-o", f"{OUT_PREFIX}_zeroshot.wav", "-l", "es"]
-    res1 = run_command(cmd1, "Zero-shot Baseline")
+    # 1. Baseline Inferencia (Voz por Defecto)
+    cmd1 = [CLI_PATH, "-m", MODEL_DIR, "-tts", TTS_MODEL, "-t", TEST_TEXT, "-o", f"{OUT_PREFIX}_baseline.wav", "-l", "es", "--temperature", "0"]
+    res1 = run_command(cmd1, "Baseline (Generic Voice)")
     if res1: results.append(res1)
-    
-    # 2. X-Vector Only
-    cmd2 = [CLI_PATH, "-m", MODEL_DIR, "-tts", TTS_MODEL, "-t", TEST_TEXT, "-r", REF_AUDIO, "-x", "-o", f"{OUT_PREFIX}_xvector.wav", "-l", "es"]
-    res2 = run_command(cmd2, "X-Vector Only Clone")
+
+    # 2. True Zero-Shot Cloning (WAV file reference only)
+    WAV_REF = os.path.splitext(REF_AUDIO)[0] + ".wav"
+    cmd2 = [CLI_PATH, "-m", MODEL_DIR, "-tts", TTS_MODEL, "-t", TEST_TEXT, "-r", WAV_REF, "-o", f"{OUT_PREFIX}_truesz.wav", "-l", "es", "--temperature", "0"]
+    res2 = run_command(cmd2, "True Zero-Shot (.wav ref)")
     if res2: results.append(res2)
     
-    # 3. Full ICL
-    cmd3 = [CLI_PATH, "-m", MODEL_DIR, "-tts", TTS_MODEL, "-t", TEST_TEXT, "-r", REF_AUDIO, "-p", REF_TEXT, "-o", f"{OUT_PREFIX}_icl.wav", "-l", "es"]
-    res3 = run_command(cmd3, "Full ICL Clone")
+    # 3. X-Vector Only Profile (.q3vp bypassing codes)
+    cmd3 = [CLI_PATH, "-m", MODEL_DIR, "-tts", TTS_MODEL, "-t", TEST_TEXT, "-r", REF_AUDIO, "-x", "-o", f"{OUT_PREFIX}_xvector.wav", "-l", "es", "--temperature", "0"]
+    res3 = run_command(cmd3, "X-Vector Only (.q3vp)")
     if res3: results.append(res3)
+    
+    # 4. Full ICL Profile (.q3vp + Reference Transcript)
+    cmd4 = [CLI_PATH, "-m", MODEL_DIR, "-tts", TTS_MODEL, "-t", TEST_TEXT, "-r", REF_AUDIO, "-p", REF_TEXT, "-o", f"{OUT_PREFIX}_icl.wav", "-l", "es", "--temperature", "0"]
+    res4 = run_command(cmd4, "Full ICL Clone (.q3vp+txt)")
+    if res4: results.append(res4)
     
     print("\n" + "="*50)
     print("BENCHMARK SUMMARY")

@@ -1,0 +1,26 @@
+Starting Qwen3-TTS Server (Baseline Mode - No Voice Ref)...
+Waiting for server to load models...
+Server is ready!
+
+[Cold Start (1 text)] Completed 1 audios in 23.760 seconds.
+[Warm Start (1 text)] Completed 1 audios in 21.997 seconds.
+
+--- Batched Inference (1 request with 6 texts) ---
+[Batched Request] Completed 6 audios in 27.134 seconds.
+
+--- Concurrent Network Requests (6 serialized by Mutex) ---
+
+============================================================
+SERVER TIMING COMPARISON
+============================================================
+Single Request (Cold):        23.760 s
+Single Request (Warm):        21.997 s
+------------------------------------------------------------
+Batched Request (6 texts):    27.134 s total  [GPU Parallelized]
+  -> Average per audio:       4.522 s
+------------------------------------------------------------
+Concurrent Requests (6 txts): 112.889 s total  [Mutex Serialized]
+  -> Average per audio:       18.815 s
+============================================================
+
+Shutting down server...
