@@ -13,6 +13,7 @@ models/coreml/
 # interno
 .docs/
 .test/
+logs/
 
 # Reference outputs (generated)
 reference/*.bin
