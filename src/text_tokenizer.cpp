@@ -313,6 +313,11 @@ std::vector<int32_t> TextTokenizer::encode_for_tts(const std::string & text) con
     auto text_tokens = encode(text);
     tokens.insert(tokens.end(), text_tokens.begin(), text_tokens.end());
     
+    // According to Qwen3 Python logic, the text isn't explicitly followed by <|im_end|> immediately in _build_assistant_text
+    // It returns: <|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n
+    // BUT PyTorch explicitly strips these 5 suffix tokens using `input_id[:, 4:-5]` before passing the trailing text into generation context.
+    // Thus, we omit appending them here entirely in C++ to avoid sending ChatML metadata into the audio synthesis stream.
+    
     return tokens;
 }
 
@@ -335,4 +340,33 @@ std::string TextTokenizer::decode_token(int32_t token_id) const {
     return unicode_to_bytes(token);
 }
 
+std::vector<int32_t> TextTokenizer::encode_instruct(const std::string & instruct_text) const {
+    if (!loaded_ || instruct_text.empty()) {
+        return {};
+    }
+    
+    std::vector<int32_t> tokens;
+    
+    // <|im_start|>
+    tokens.push_back(config_.bos_token_id);
+    
+    // user
+    auto user_tokens = encode("user");
+    tokens.insert(tokens.end(), user_tokens.begin(), user_tokens.end());
+    
+    // \n
+    tokens.push_back(newline_token_id_);
+    
+    // Encode the instruct_text
+    auto ref_tokens = encode(instruct_text);
+    tokens.insert(tokens.end(), ref_tokens.begin(), ref_tokens.end());
+    
+    // <|im_end|>
+    tokens.push_back(config_.eos_token_id);
+    
+    // \n
+    tokens.push_back(newline_token_id_);
+    
+    return tokens;
+}
 } // namespace qwen3_tts

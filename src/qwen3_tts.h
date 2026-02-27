@@ -4,6 +4,7 @@
 #include "tts_transformer.h"
 #include "audio_tokenizer_encoder.h"
 #include "audio_tokenizer_decoder.h"
+#include "voice_profile.h"
 
 #include <string>
 #include <vector>
@@ -97,26 +98,35 @@ public:
     // Generate speech with voice cloning
     // text: input text to synthesize
     // reference_audio: path to reference audio file (WAV, 24kHz)
+    // reference_text: optional exact transcript of the reference audio (improves prosody cloning)
     // params: generation parameters
     tts_result synthesize_with_voice(const std::string & text,
                                       const std::string & reference_audio,
+                                      const std::string & reference_text = "",
+                                      bool x_vector_only = false,
                                       const tts_params & params = tts_params());
     
     // Generate speech with voice cloning from samples
     // text: input text to synthesize
     // ref_samples: reference audio samples (24kHz, mono, normalized to [-1, 1])
     // n_ref_samples: number of reference samples
+    // reference_text: optional exact transcript of the reference audio
     // params: generation parameters
     tts_result synthesize_with_voice(const std::string & text,
                                       const float * ref_samples, int32_t n_ref_samples,
+                                      const std::string & reference_text = "",
+                                      bool x_vector_only = false,
                                       const tts_params & params = tts_params());
     
     // Generate a batch of speech from multiple texts with/without voice cloning
     // texts: list of input texts to synthesize sequentially or in batch
     // reference_audio: path to reference audio file (optional, empty means no voice cloning)
+    // reference_text: optional exact transcript of the reference audio
     // params: generation parameters
     std::vector<tts_result> synthesize_batch(const std::vector<std::string> & texts,
                                              const std::string & reference_audio,
+                                             const std::string & reference_text = "",
+                                             bool x_vector_only = false,
                                              const tts_params & params = tts_params());
 
     // Set progress callback
@@ -130,7 +140,9 @@ public:
     
 private:
     tts_result synthesize_internal(const std::string & text,
+                                   const std::string & reference_text,
                                    const float * speaker_embedding,
+                                   const std::vector<int32_t> * ref_audio_codes,
                                    const tts_params & params,
                                    tts_result & result);
     

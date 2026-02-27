@@ -52,6 +52,7 @@ tts_lib.qwen3_tts_synthesize_batch.argtypes = [
     ctypes.POINTER(ctypes.c_char_p),       # texts
     ctypes.c_size_t,                       # num_texts
     ctypes.c_char_p,                       # reference_audio_path
+    ctypes.c_char_p,                       # reference_text
     Qwen3TTSParams                         # params
 ]
 tts_lib.qwen3_tts_synthesize_batch.restype = ctypes.POINTER(Qwen3TTSBatchResult)
@@ -78,17 +79,22 @@ def main():
     
     texts_list = [
         b"Checking out the new C API batching, amazing!",
-        b"Segundo audio generado dinamicamente desde ctypes en Python."
+        # b"Segundo audio generado dinamicamente desde ctypes en Python."
     ]
     
     # Create C array of strings
     CStrArray = ctypes.c_char_p * len(texts_list)
     c_texts = CStrArray(*texts_list)
     
+    # Read actual reference text
+    ref_txt_path = "../audioref/voz_test_0493.txt"
+    with open(ref_txt_path, "rb") as f:
+        ref_text_bytes = f.read().strip()
+    
     params = tts_lib.qwen3_tts_default_params()
     
     # Synthesize
-    batch_res = tts_lib.qwen3_tts_synthesize_batch(ctx, c_texts, len(texts_list), b"../audioref/voz_test_0493.wav", params)
+    batch_res = tts_lib.qwen3_tts_synthesize_batch(ctx, c_texts, len(texts_list), b"../audioref/voz_test_0493.bin", ref_text_bytes, params)
     
     if batch_res:
         res_ptr = batch_res.contents

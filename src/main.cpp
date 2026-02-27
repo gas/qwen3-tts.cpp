@@ -14,6 +14,8 @@ void print_usage(const char * program) {
     fprintf(stderr, "  -f, --file <file>      Text file with phrases to synthesize (one per line)\n");
     fprintf(stderr, "  -o, --output <file>    Output WAV file prefix/name (default: output)\n");
     fprintf(stderr, "  -r, --reference <file> Reference audio for voice cloning\n");
+    fprintf(stderr, "  -p, --ref-text <text>  Reference text transcript for voice cloning\n");
+    fprintf(stderr, "  -x, --x-vector-only    Disable ICL acoustic codes when loading .q3vp voice profiles\n");
     fprintf(stderr, "  --temperature <val>    Sampling temperature (default: 0.9, 0=greedy)\n");
     fprintf(stderr, "  --top-k <n>            Top-k sampling (default: 50, 0=disabled)\n");
     fprintf(stderr, "  --top-p <val>          Top-p sampling (default: 1.0)\n");
@@ -35,7 +37,9 @@ int main(int argc, char ** argv) {
     std::string input_file;
     std::string output_file = "output.wav";
     std::string reference_audio;
+    std::string reference_text;
     std::string tts_model_name;
+    bool x_vector_only = false;
     
     qwen3_tts::tts_params params;
     
@@ -84,6 +88,14 @@ int main(int argc, char ** argv) {
                 return 1;
             }
             reference_audio = argv[i];
+        } else if (arg == "-p" || arg == "--ref-text") {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: missing reference text\n");
+                return 1;
+            }
+            reference_text = argv[i];
+        } else if (arg == "-x" || arg == "--x-vector-only") {
+            x_vector_only = true;
         } else if (arg == "--temperature") {
             if (++i >= argc) {
                 fprintf(stderr, "Error: missing temperature value\n");
@@ -181,6 +193,38 @@ int main(int argc, char ** argv) {
         return 1;
     }
     
+    if (reference_text.empty() && !reference_audio.empty()) {
+        std::string txt_path = reference_audio;
+        size_t dot_pos = txt_path.find_last_of('.');
+        if (dot_pos != std::string::npos) {
+            txt_path = txt_path.substr(0, dot_pos) + ".txt";
+            FILE * fp = fopen(txt_path.c_str(), "r");
+            if (fp) {
+                fclose(fp);
+                reference_text = txt_path;
+                fprintf(stderr, "Auto-detected reference text file: %s\n", reference_text.c_str());
+            }
+        }
+    }
+
+    if (!reference_text.empty()) {
+        FILE * fp = fopen(reference_text.c_str(), "r");
+        if (fp) {
+            std::string path_name = reference_text;
+            std::string content;
+            char buf[4096];
+            while (size_t bytes = fread(buf, 1, sizeof(buf), fp)) {
+                content.append(buf, bytes);
+            }
+            fclose(fp);
+            while (!content.empty() && (content.back() == '\n' || content.back() == '\r')) {
+                content.pop_back();
+            }
+            reference_text = content;
+            fprintf(stderr, "Loaded reference text from file: %s (%zu bytes)\n", path_name.c_str(), reference_text.size());
+        }
+    }
+    
     // Initialize TTS
     qwen3_tts::Qwen3TTS tts;
     
@@ -212,9 +256,14 @@ int main(int argc, char ** argv) {
         
         std::vector<qwen3_tts::tts_result> chunk_results;
         if (reference_audio.empty()) {
-            chunk_results = tts.synthesize_batch(chunk_texts, "", params);
+            chunk_results = tts.synthesize_batch(chunk_texts, "", "", x_vector_only, params);
         } else {
-            chunk_results = tts.synthesize_batch(chunk_texts, reference_audio, params);
+            if (!x_vector_only && reference_text.empty() && 
+                (reference_audio.find(".q3vp") == std::string::npos) && 
+                (reference_audio.find(".bin") == std::string::npos)) {
+                fprintf(stderr, "Warning: Using voice cloning (ICL) without a reference transcript (-p) may cause prosody and pitch artifacts.\n");
+            }
+            chunk_results = tts.synthesize_batch(chunk_texts, reference_audio, reference_text, x_vector_only, params);
         }
         
         // Save chunk outputs immediately

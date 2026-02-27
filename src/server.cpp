@@ -166,7 +166,43 @@ int main(int argc, char** argv) {
                 return;
             }
 
-            std::string voice_ref = body.value("voice_ref", default_voice_ref);
+            std::string ref_audio = body.value("voice_ref", default_voice_ref); // Existing voice_ref maps to ref_audio
+            std::string ref_text = "";
+            bool x_vector_only = false;
+            
+            if (body.contains("voice_ref_audio") && body["voice_ref_audio"].is_string()) {
+                ref_audio = body["voice_ref_audio"].get<std::string>();
+            }
+            
+            if (body.contains("voice_ref_text") && body["voice_ref_text"].is_string()) {
+                ref_text = body["voice_ref_text"].get<std::string>();
+            }
+            
+            if (body.contains("x_vector_only") && body["x_vector_only"].is_boolean()) {
+                x_vector_only = body["x_vector_only"].get<bool>();
+            }
+
+            if (ref_text.empty() && !ref_audio.empty()) {
+                std::string txt_path = ref_audio;
+                size_t dot_pos = txt_path.find_last_of('.');
+                if (dot_pos != std::string::npos) {
+                    txt_path = txt_path.substr(0, dot_pos) + ".txt";
+                    FILE * fp = fopen(txt_path.c_str(), "r");
+                    if (fp) {
+                        std::string content;
+                        char buf[4096];
+                        while (size_t bytes = fread(buf, 1, sizeof(buf), fp)) {
+                            content.append(buf, bytes);
+                        }
+                        fclose(fp);
+                        while (!content.empty() && (content.back() == '\n' || content.back() == '\r')) {
+                            content.pop_back();
+                        }
+                        ref_text = content;
+                        std::cout << "Auto-detected reference text from: " << txt_path << std::endl;
+                    }
+                }
+            }
             int lang_id = 2050; // default to EN
 
             if (body.contains("language")) {
@@ -199,8 +235,14 @@ int main(int argc, char** argv) {
                         chunk_inputs.push_back(chunk_inputs.back());
                     }
                     
-                    auto chunk_res = ctx.engine.synthesize_batch(chunk_inputs, voice_ref, params);
-                    results.insert(results.end(), chunk_res.begin(), chunk_res.begin() + original_chunk_size);
+                    std::vector<qwen3_tts::tts_result> chunk_results;
+            
+                    if (ref_audio.empty()) {
+                        chunk_results = ctx.engine.synthesize_batch(chunk_inputs, "", "", false, params);
+                    } else {
+                        chunk_results = ctx.engine.synthesize_batch(chunk_inputs, ref_audio, ref_text, x_vector_only, params);
+                    }
+                    results.insert(results.end(), chunk_results.begin(), chunk_results.begin() + original_chunk_size);
                 }
             }
 

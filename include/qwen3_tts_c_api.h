@@ -73,6 +73,7 @@ QWEN3_TTS_API bool qwen3_tts_load_models(qwen3_tts_context* ctx, const char* mod
  * @param texts Array of text strings
  * @param num_texts Number of elements in the texts array
  * @param reference_audio_path Path to a reference WAV file for voice cloning (can be NULL or empty for default speaker)
+ * @param reference_text Optional exact transcript of the reference audio for better prosody cloning. (can be NULL or empty)
  * @param params Synthesis parameters
  * @return A qwen3_tts_batch_result struct containing the generated audio. Must be freed with qwen3_tts_free_batch_result.
  */
@@ -81,6 +82,8 @@ QWEN3_TTS_API qwen3_tts_batch_result* qwen3_tts_synthesize_batch(
     const char** texts, 
     size_t num_texts, 
     const char* reference_audio_path, 
+    const char* reference_text,
+    bool x_vector_only,
     qwen3_tts_c_params params);
 
 /**

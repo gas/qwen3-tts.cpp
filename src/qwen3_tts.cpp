@@ -205,14 +205,29 @@ tts_result Qwen3TTS::synthesize(const std::string & text,
     // This will use the model's default voice characteristics
     std::vector<float> zero_embedding(transformer_.get_config().hidden_size, 0.0f);
     
-    return synthesize_internal(text, zero_embedding.data(), params, result);
+    return synthesize_internal(text, "", zero_embedding.data(), nullptr, params, result);
 }
 
 tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
                                             const std::string & reference_audio,
+                                            const std::string & reference_text,
+                                            bool x_vector_only,
                                             const tts_params & params) {
     tts_result result;
     
+    // Check for offline voice profiles
+    if ((reference_audio.length() >= 5 && reference_audio.substr(reference_audio.length() - 5) == ".q3vp") || 
+        (reference_audio.length() >= 4 && reference_audio.substr(reference_audio.length() - 4) == ".bin")) {
+        voice_profile profile;
+        if (!load_voice_profile(reference_audio, profile)) {
+            result.error_msg = "Failed to load voice profile: " + reference_audio;
+            return result;
+        }
+        // If x_vector_only is requested, pass nullptr for ref_audio_codes to skip ICL
+        const std::vector<int32_t>* codes_ptr = x_vector_only ? nullptr : &profile.audio_codes;
+        return synthesize_internal(text, reference_text, profile.speaker_embedding.data(), codes_ptr, params, result);
+    }
+
     std::vector<float> ref_samples;
     int ref_sample_rate;
     if (!load_audio_file(reference_audio, ref_samples, ref_sample_rate)) {
@@ -228,11 +243,13 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
         ref_samples = std::move(resampled);
     }
     
-    return synthesize_with_voice(text, ref_samples.data(), (int32_t)ref_samples.size(), params);
+    return synthesize_with_voice(text, ref_samples.data(), (int32_t)ref_samples.size(), reference_text, x_vector_only, params);
 }
 
 tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
                                             const float * ref_samples, int32_t n_ref_samples,
+                                            const std::string & reference_text,
+                                            bool x_vector_only,
                                             const tts_params & params) {
     tts_result result;
     
@@ -272,16 +289,41 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
         fprintf(stderr, "Speaker embedding extracted: %zu floats\n", speaker_embedding.size());
     }
     
-    return synthesize_internal(text, speaker_embedding.data(), params, result);
+    // When synthesizing from float buffer without a .q3vp, we don't have ref_codes
+    std::vector<int32_t> empty_codes;
+    return synthesize_internal(text, reference_text, speaker_embedding.data(), x_vector_only ? nullptr : &empty_codes, params, result);
 }
 
 std::vector<tts_result> Qwen3TTS::synthesize_batch(const std::vector<std::string> & texts,
                                                    const std::string & reference_audio,
+                                                   const std::string & reference_text,
+                                                   bool x_vector_only,
                                                    const tts_params & params) {
     std::vector<tts_result> results(texts.size());
     
     std::vector<float> speaker_embedding(transformer_.get_config().hidden_size, 0.0f);
+    std::vector<int32_t> audio_codes;
+    bool has_audio_codes = false;
     int64_t t_encode_ms_total = 0;
+    
+    // Parse voice profile first or decode wav
+    bool is_offline_profile = (reference_audio.length() >= 5 && reference_audio.substr(reference_audio.length() - 5) == ".q3vp") ||
+                              (reference_audio.length() >= 4 && reference_audio.substr(reference_audio.length() - 4) == ".bin");
+    
+    if (is_offline_profile) {
+        voice_profile profile;
+        if (!load_voice_profile(reference_audio, profile)) {
+            for (auto &r : results) r.error_msg = "Failed to load voice profile: " + reference_audio;
+            return results;
+        }
+        
+        const std::vector<int32_t>* codes_ptr = x_vector_only ? nullptr : &profile.audio_codes;
+
+        for (size_t i = 0; i < texts.size(); ++i) {
+            synthesize_internal(texts[i], reference_text, profile.speaker_embedding.data(), codes_ptr, params, results[i]);
+        }
+        return results;
+    }
     
     if (!reference_audio.empty()) {
         std::vector<float> ref_samples;
@@ -334,8 +376,10 @@ std::vector<tts_result> Qwen3TTS::synthesize_batch(const std::vector<std::string
         fprintf(stderr, "Pre-tokenizing batch of %zu sequences...\n", texts.size());
     }
 
+    std::vector<std::vector<int32_t>> all_instruct_tokens(texts.size());
     std::vector<std::vector<int32_t>> all_text_tokens(texts.size());
     for (size_t i = 0; i < texts.size(); ++i) {
+        all_instruct_tokens[i] = tokenizer_.encode(reference_text);
         all_text_tokens[i] = tokenizer_.encode_for_tts(texts[i]);
     }
 
@@ -351,7 +395,10 @@ std::vector<tts_result> Qwen3TTS::synthesize_batch(const std::vector<std::string
     }
     transformer_.clear_kv_cache();
 
-    if (!transformer_.generate_batch(all_text_tokens, reference_audio.empty() ? nullptr : speaker_embedding.data(), params.max_audio_tokens,
+    if (!transformer_.generate_batch(all_instruct_tokens, all_text_tokens, 
+                                     reference_audio.empty() ? nullptr : speaker_embedding.data(),
+                                     has_audio_codes ? &audio_codes : nullptr,
+                                     params.max_audio_tokens,
                                      all_speech_codes, params.language_id, params.repetition_penalty,
                                      params.temperature, params.top_k)) {
         for (auto & res : results) res.error_msg = "Failed to generate batch speech codes: " + transformer_.get_error();
@@ -398,7 +445,9 @@ std::vector<tts_result> Qwen3TTS::synthesize_batch(const std::vector<std::string
 }
 
 tts_result Qwen3TTS::synthesize_internal(const std::string & text,
+                                          const std::string & reference_text,
                                           const float * speaker_embedding,
+                                          const std::vector<int32_t> * ref_audio_codes,
                                           const tts_params & params,
                                           tts_result & result) {
     int64_t t_total_start = get_time_ms();
@@ -430,6 +479,14 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
     
     // Step 2: Tokenize input text
     int64_t t_tokenize_start = get_time_ms();
+    std::vector<int32_t> instruct_tokens;
+    if (!reference_text.empty()) {
+        instruct_tokens = tokenizer_.encode(reference_text);
+        fprintf(stderr, "ICL Reference Tokens length: %zu\n", instruct_tokens.size());
+        fprintf(stderr, "ICL Reference Tokens: ");
+        for (auto t : instruct_tokens) fprintf(stderr, "%d ", t);
+        fprintf(stderr, "\n");
+    }
     std::vector<int32_t> text_tokens = tokenizer_.encode_for_tts(text);
     result.t_tokenize_ms = get_time_ms() - t_tokenize_start;
     sample_memory("synth/after-tokenize");
@@ -467,8 +524,9 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
     transformer_.clear_kv_cache();
     
     std::vector<int32_t> speech_codes;
-    if (!transformer_.generate(text_tokens.data(), (int32_t)text_tokens.size(),
-                               speaker_embedding, params.max_audio_tokens, speech_codes,
+    if (!transformer_.generate(instruct_tokens.data(), (int32_t)instruct_tokens.size(),
+                               text_tokens.data(), (int32_t)text_tokens.size(),
+                               speaker_embedding, ref_audio_codes, params.max_audio_tokens, speech_codes,
                                params.language_id, params.repetition_penalty,
                                params.temperature, params.top_k)) {
         result.error_msg = "Failed to generate speech codes: " + transformer_.get_error();

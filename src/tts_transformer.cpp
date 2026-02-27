@@ -1010,8 +1010,11 @@ bool TTSTransformer::project_text_tokens(const int32_t * text_tokens, int32_t n_
     return true;
 }
 
-bool TTSTransformer::build_prefill_graph(const int32_t * text_tokens, int32_t n_tokens,
-                                         const float * speaker_embd, int32_t language_id,
+bool TTSTransformer::build_prefill_graph(const int32_t * instruct_tokens, int32_t n_instruct_tokens,
+                                         const int32_t * text_tokens, int32_t n_tokens,
+                                         const float * speaker_embd,
+                                         const std::vector<int32_t> * audio_codes,
+                                         int32_t language_id,
                                          std::vector<float> & prefill_embd,
                                          std::vector<float> & trailing_text_hidden,
                                          std::vector<float> & tts_pad_embed) {
@@ -1083,8 +1086,11 @@ bool TTSTransformer::build_prefill_graph(const int32_t * text_tokens, int32_t n_
     }
 
     const bool has_speaker = (speaker_embd != nullptr);
-    const int32_t codec_input_len = (int32_t)codec_prefill_tokens.size() + (has_speaker ? 1 : 0) + 2;
-    std::vector<float> codec_input_embedding((size_t)codec_input_len * hidden_size);
+    const bool is_icl = (audio_codes != nullptr && !audio_codes->empty());
+    
+    // Base codec tokens
+    int32_t codec_base_len = (int32_t)codec_prefill_tokens.size() + (has_speaker ? 1 : 0) + 2;
+    std::vector<float> codec_input_embedding((size_t)codec_base_len * hidden_size);
 
     int32_t dst_token = 0;
     memcpy(codec_input_embedding.data(), codec_prefill_embed.data(), codec_prefill_embed.size() * sizeof(float));
@@ -1099,7 +1105,8 @@ bool TTSTransformer::build_prefill_graph(const int32_t * text_tokens, int32_t n_
     memcpy(codec_input_embedding.data() + (size_t)dst_token * hidden_size,
            codec_tail_embed.data(), codec_tail_embed.size() * sizeof(float));
 
-    const int32_t codec_plus_overlay_len = codec_input_len - 1;
+    // _talker_input_embed: overlays padding over codec_input_embedding[:, :-1]
+    const int32_t codec_plus_overlay_len = codec_base_len - 1;
     std::vector<float> codec_plus_overlay((size_t)codec_plus_overlay_len * hidden_size);
     for (int32_t t = 0; t < codec_plus_overlay_len; ++t) {
         const float * overlay = (t == codec_plus_overlay_len - 1)
@@ -1112,47 +1119,129 @@ bool TTSTransformer::build_prefill_graph(const int32_t * text_tokens, int32_t n_
         }
     }
 
-    std::vector<float> first_text_embed;
-    if (!project_text_tokens(text_tokens + 3, 1, first_text_embed)) {
-        return false;
-    }
+    std::vector<float> base_talker_embed;
+    base_talker_embed.resize((3 + codec_plus_overlay_len) * hidden_size);
+    memcpy(base_talker_embed.data(), role_embed.data(), 3 * hidden_size * sizeof(float));
+    memcpy(base_talker_embed.data() + 3 * hidden_size, codec_plus_overlay.data(), codec_plus_overlay_len * hidden_size * sizeof(float));
 
-    std::vector<float> first_text_plus_codec_bos(hidden_size);
-    const float * codec_bos_embed = codec_input_embedding.data() + (size_t)(codec_input_len - 1) * hidden_size;
-    for (int32_t h = 0; h < hidden_size; ++h) {
-        first_text_plus_codec_bos[h] = first_text_embed[h] + codec_bos_embed[h];
-    }
+    int32_t n_target_text = std::max(0, n_tokens - 3);
 
-    const int32_t prefill_len = 3 + codec_plus_overlay_len + 1;
-    prefill_embd.resize((size_t)prefill_len * hidden_size);
-    int32_t offset = 0;
-    
-    // 1. role_embed (3)
-    memcpy(prefill_embd.data() + offset * hidden_size, role_embed.data(), 3 * hidden_size * sizeof(float));
-    offset += 3;
+    if (is_icl) {
+        // ICL MODE:
+        // PyTorch simply concatenates [ref_text, target_text, tts_eos]
+        // and concatenates [codec_bos, codec_frames]
+        // and then adds them together positionally: text_embed + codec_embed
+        
+        int32_t text_lens = n_instruct_tokens + n_target_text + 1;
+        std::vector<float> text_embed(text_lens * hidden_size);
+        int32_t text_idx = 0;
+        
+        if (n_instruct_tokens > 0) {
+            std::vector<float> ref_proj;
+            if (project_text_tokens(instruct_tokens, n_instruct_tokens, ref_proj)) {
+                memcpy(text_embed.data() + text_idx * hidden_size, ref_proj.data(), n_instruct_tokens * hidden_size * sizeof(float));
+                text_idx += n_instruct_tokens;
+            } else return false;
+        }
+        
+        if (n_target_text > 0) {
+            std::vector<float> target_proj;
+            if (project_text_tokens(text_tokens + 3, n_target_text, target_proj)) {
+                memcpy(text_embed.data() + text_idx * hidden_size, target_proj.data(), n_target_text * hidden_size * sizeof(float));
+                text_idx += n_target_text;
+            } else return false;
+        }
+        
+        memcpy(text_embed.data() + text_idx * hidden_size, tts_eos_embed.data(), hidden_size * sizeof(float));
+        
+        int32_t n_ref_frames = (int32_t)(audio_codes->size() / 16);
+        int32_t codec_lens = 1 + n_ref_frames;
+        std::vector<float> codec_embed(codec_lens * hidden_size);
+        
+        // codec_bos is codec_tail_embed.data() + hidden_size
+        memcpy(codec_embed.data(), codec_tail_embed.data() + hidden_size, hidden_size * sizeof(float));
+        
+        for (int32_t t = 0; t < n_ref_frames; ++t) {
+            float * out_embd = codec_embed.data() + (1 + t) * hidden_size;
+            memset(out_embd, 0, hidden_size * sizeof(float));
+            for (int32_t c = 0; c < 16; ++c) {
+                int32_t tok_id = (*audio_codes)[t * 16 + c];
+                struct ggml_tensor * embd_tensor = (c == 0) ? model_.codec_embd : model_.code_pred_embd[c - 1];
+                std::vector<float> single_embd;
+                if (!lookup_embedding_rows(embd_tensor, &tok_id, 1, "ref_code", "ref_code_row", single_embd)) return false;
+                for (int32_t h = 0; h < hidden_size; ++h) out_embd[h] += single_embd[h];
+            }
+        }
+        
+        // Add them together (since non_streaming_mode=False in TTS generation, icl_input_embed size = codec_lens)
+        // PyTorch does:
+        // if text_lens > codec_lens:
+        //     return text_embed[:, :codec_lens] + codec_embed, text_embed[:, codec_lens:]
+        // else:
+        //     text_embed = torch.cat([...pad...])
+        //     return text_embed + codec_embed, tts_pad_embed
+        
+        int32_t icl_len = codec_lens; 
+        std::vector<float> icl_input_embed(icl_len * hidden_size);
+        for (int32_t i = 0; i < icl_len; ++i) {
+            const float * t_row = (i < text_lens) ? (text_embed.data() + i * hidden_size) : tts_pad_embed.data();
+            const float * c_row = codec_embed.data() + i * hidden_size;
+            float * out_row = icl_input_embed.data() + i * hidden_size;
+            for (int32_t h = 0; h < hidden_size; ++h) {
+                out_row[h] = t_row[h] + c_row[h];
+            }
+        }
+        
+        if (text_lens > codec_lens) {
+            int32_t trailing_len = text_lens - codec_lens;
+            trailing_text_hidden.resize(trailing_len * hidden_size);
+            memcpy(trailing_text_hidden.data(), text_embed.data() + codec_lens * hidden_size, trailing_len * hidden_size * sizeof(float));
+        } else {
+            trailing_text_hidden.resize(hidden_size);
+            memcpy(trailing_text_hidden.data(), tts_pad_embed.data(), hidden_size * sizeof(float));
+        }
+        
+        int32_t prefill_len = (int32_t)(base_talker_embed.size() / hidden_size) + icl_len;
+        prefill_embd.resize(prefill_len * hidden_size);
+        memcpy(prefill_embd.data(), base_talker_embed.data(), base_talker_embed.size() * sizeof(float));
+        memcpy(prefill_embd.data() + base_talker_embed.size(), icl_input_embed.data(), icl_len * hidden_size * sizeof(float));
+        
+    } else {
+        // NON-ICL MODE (Standard Text Generation)
+        std::vector<float> first_text_embed;
+        if (n_target_text > 0) {
+            if (!project_text_tokens(text_tokens + 3, 1, first_text_embed)) return false;
+        } else {
+            first_text_embed = tts_pad_embed;
+        }
 
-    // 2. codec_plus_overlay 
-    memcpy(prefill_embd.data() + offset * hidden_size, codec_plus_overlay.data(), codec_plus_overlay_len * hidden_size * sizeof(float));
-    offset += codec_plus_overlay_len;
+        std::vector<float> first_text_plus_codec_bos(hidden_size);
+        const float * codec_bos_embed = codec_input_embedding.data() + (size_t)(codec_base_len - 1) * hidden_size;
+        for (int32_t h = 0; h < hidden_size; ++h) {
+            first_text_plus_codec_bos[h] = first_text_embed[h] + codec_bos_embed[h];
+        }
 
-    // 3. first_text_plus_codec_bos (1)
-    memcpy(prefill_embd.data() + offset * hidden_size, first_text_plus_codec_bos.data(), 1 * hidden_size * sizeof(float));
+        int32_t prefill_len = (int32_t)(base_talker_embed.size() / hidden_size) + 1;
+        prefill_embd.resize(prefill_len * hidden_size);
+        memcpy(prefill_embd.data(), base_talker_embed.data(), base_talker_embed.size() * sizeof(float));
+        memcpy(prefill_embd.data() + base_talker_embed.size(), first_text_plus_codec_bos.data(), hidden_size * sizeof(float));
 
-    const int32_t trailing_token_count = std::max(0, n_tokens - 4);
-    std::vector<float> trailing_text_proj;
-    if (trailing_token_count > 0) {
-        if (!project_text_tokens(text_tokens + 4, trailing_token_count, trailing_text_proj)) {
-            return false;
+        trailing_text_hidden.clear();
+        if (n_target_text > 1) {
+            int32_t trail_len = n_target_text - 1;
+            trailing_text_hidden.resize(trail_len * hidden_size);
+            std::vector<float> tail_proj;
+            if (!project_text_tokens(text_tokens + 4, trail_len, tail_proj)) return false;
+            memcpy(trailing_text_hidden.data(), tail_proj.data(), trail_len * hidden_size * sizeof(float));
+            
+            // Add tts_eos
+            trailing_text_hidden.resize((trail_len + 1) * hidden_size);
+            memcpy(trailing_text_hidden.data() + trail_len * hidden_size, tts_eos_embed.data(), hidden_size * sizeof(float));
+        } else {
+            trailing_text_hidden.resize(hidden_size);
+            memcpy(trailing_text_hidden.data(), tts_eos_embed.data(), hidden_size * sizeof(float));
         }
     }
-
-    const int32_t trailing_len = trailing_token_count + 1;
-    trailing_text_hidden.resize((size_t)trailing_len * hidden_size);
-    if (trailing_token_count > 0) {
-        memcpy(trailing_text_hidden.data(), trailing_text_proj.data(), trailing_text_proj.size() * sizeof(float));
-    }
-    memcpy(trailing_text_hidden.data() + (size_t)(trailing_len - 1) * hidden_size,
-           tts_eos_embed.data(), hidden_size * sizeof(float));
 
     return true;
 }
@@ -2720,8 +2809,11 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
     return true;
 }
 
-bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
-                               const float * speaker_embd, int32_t max_len,
+bool TTSTransformer::generate(const int32_t * instruct_tokens, int32_t n_instruct_tokens,
+                               const int32_t * text_tokens, int32_t n_tokens,
+                               const float * speaker_embd,
+                               const std::vector<int32_t> * audio_codes,
+                               int32_t max_len,
                                std::vector<int32_t> & output,
                                int32_t language_id,
                                float repetition_penalty,
@@ -2761,7 +2853,7 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
 #ifdef QWEN3_TTS_TIMING
     t0 = clk::now();
 #endif
-    if (!build_prefill_graph(text_tokens, n_tokens, speaker_embd, language_id,
+    if (!build_prefill_graph(instruct_tokens, n_instruct_tokens, text_tokens, n_tokens, speaker_embd, audio_codes, language_id,
                              prefill_embd, trailing_text_hidden, tts_pad_embed)) {
         return false;
     }
@@ -3011,8 +3103,11 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
     return true;
 }
 
-bool TTSTransformer::generate_batch(const std::vector<std::vector<int32_t>> & texts_tokens,
-                                    const float * speaker_embd, int32_t max_len,
+bool TTSTransformer::generate_batch(const std::vector<std::vector<int32_t>> & instruct_tokens,
+                                    const std::vector<std::vector<int32_t>> & texts_tokens,
+                                    const float * speaker_embd,
+                                    const std::vector<int32_t> * audio_codes,
+                                    int32_t max_len,
                                     std::vector<std::vector<int32_t>> & output,
                                     int32_t language_id,
                                     float repetition_penalty,
@@ -3037,7 +3132,7 @@ bool TTSTransformer::generate_batch(const std::vector<std::vector<int32_t>> & te
     for (int b = 0; b < batch_size; ++b) {
         std::vector<float> prefill_embd;
         std::vector<float> trailing;
-        if (!build_prefill_graph(texts_tokens[b].data(), texts_tokens[b].size(), speaker_embd, language_id,
+        if (!build_prefill_graph(instruct_tokens[b].data(), instruct_tokens[b].size(), texts_tokens[b].data(), texts_tokens[b].size(), speaker_embd, audio_codes, language_id,
                                  prefill_embd, trailing, tts_pad_embed)) {
             return false;
         }

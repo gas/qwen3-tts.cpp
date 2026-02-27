@@ -32,6 +32,9 @@ public:
     // Encode with TTS format: <|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n
     std::vector<int32_t> encode_for_tts(const std::string & text) const;
     
+    // Encode instructional prompt: <|im_start|>user\n{ref_text}<|im_end|>\n
+    std::vector<int32_t> encode_instruct(const std::string & instruct_text) const;
+    
     // Decode token IDs to text
     std::string decode(const std::vector<int32_t> & tokens) const;
     

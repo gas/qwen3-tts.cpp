@@ -349,11 +349,9 @@ int main(int argc, char ** argv) {
     printf("  Calling generate(n_tokens=%d, max_len=%d, language_id=2050)...\n",
            n_tokens, max_len);
 
-    bool gen_ok = transformer.generate(
-        text_tokens.data(), n_tokens, spk_ptr, max_len,
-        generated_codes, 2050, 1.05f, 0.0f, 0);
-
-    if (!gen_ok) {
+    if (!transformer.generate(nullptr, 0,
+        text_tokens.data(), n_tokens, spk_ptr, nullptr, max_len,
+        generated_codes, 2050, 1.05f, 0.0f, 0)) {
         printf("  FAIL: generate() failed: %s\n", transformer.get_error().c_str());
         fail_count++;
     } else {
