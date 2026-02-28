@@ -412,7 +412,7 @@ std::vector<tts_result> Qwen3TTS::synthesize_batch(const std::vector<std::string
 
     // Decode batch to independent wav samples 
     for (size_t i = 0; i < texts.size(); ++i) {
-        results[i].t_generate_ms = t_generate_ms / texts.size(); // Proxy Average 
+        results[i].t_generate_ms = t_generate_ms; // True parallel wall time
         if (!reference_audio.empty()) results[i].t_encode_ms = t_encode_ms_total;
         
         int n_frames = (int)all_speech_codes[i].size() / n_codebooks;
