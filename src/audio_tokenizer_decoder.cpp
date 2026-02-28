@@ -12,19 +12,8 @@
 #define QWEN3_TTS_DEC_MAX_NODES 32768
 
 #include <hip/hip_runtime.h>
-
-__global__ void hip_snake_activation_kernel_standard(int n, int ne0, int channels, const float* x, const float* alpha, const float* beta, float* dst) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        int channel = (i / ne0) % channels;
-        float a = alpha[channel];
-        float inv_b = 1.0f / beta[channel];
-        
-        float val = x[i];
-        float sin_ax = sinf(a * val);
-        dst[i] = val + inv_b * (sin_ax * sin_ax); 
-    }
-}
+#include <hip/thread>
+#include <vector>
 
 namespace qwen3_tts {
 
@@ -397,33 +386,44 @@ void ggml_compute_forward_snake_custom3(ggml_tensor * dst, const ggml_tensor * a
     // a = x, b = alpha, c = beta
     const ggml_tensor* alpha_tensor = b;
     const ggml_tensor* beta_tensor = c;
-    int alpha_elements = ggml_nelements(alpha_tensor);
-    int beta_elements = ggml_nelements(beta_tensor);
     
-    // 1. Diagnóstico: Imprimir qué está haciendo GGML por debajo
-    printf("\n--- HIPTHREADS DEBUG ---\n");
-    printf("Backend del tensor: %s\n", ggml_backend_buffer_name(dst->buffer));
-    printf("Tipo de dato: %s\n", ggml_type_name(dst->type));
-    
-    // Si GGML nos da F16, tendríamos que adaptar el kernel. Por ahora lo abortamos de forma segura.
     if (dst->type != GGML_TYPE_F32) {
-        printf("ERROR: El tensor no es F32. Es %s.\n", ggml_type_name(dst->type));
+        fprintf(stderr, "ERROR: El tensor no es F32. Es %s.\n", ggml_type_name(dst->type));
         return; 
     }
 
-    // Punteros origininables de GGML, ahora explícitamente forzados a VRAM por el scheduler
     const float* original_src_data = (const float*) a->data; 
     float* original_dst_data = (float*) dst->data;
     const float* original_alpha_data = (const float*) alpha_tensor->data;
     const float* original_beta_data =  (const float*) beta_tensor->data;
 
-    // 3. Ejecutamos un Kernel HIP clásico directamente sobre los buffers 100% seguros dentro de GPU
-    int block_size = 256;
-    int num_blocks = (n_elements + block_size - 1) / block_size;
-    
     if (n_elements > 0) {
-        // Pasar punteros de VRAM nativos de GGML
-        hipLaunchKernelGGL(hip_snake_activation_kernel_standard, dim3(num_blocks), dim3(block_size), 0, 0, n_elements, ne0, channels, original_src_data, original_alpha_data, original_beta_data, original_dst_data);
+        // Ejecución persistente con hipThreads
+        std::vector<hip::thread> threads(hip::thread::hardware_concurrency());
+        for (unsigned int i = 0; i < threads.size(); ++i) {
+            uint32_t chunk_size = (i < (uint32_t)n_elements % threads.size()) ? ((uint32_t)n_elements / threads.size() + 1) : ((uint32_t)n_elements / threads.size());
+            uint32_t offset =     (i < (uint32_t)n_elements % threads.size()) ? (i * chunk_size)         : (i * chunk_size + (uint32_t)n_elements % threads.size());
+            
+            threads[i] = hip::thread(hip::thread::max_width(),
+                [] __device__(uint32_t n, int ne0, int channels, const float* x, const float* alpha, const float* beta, float* dst, uint32_t offset) {
+                    for (uint32_t j = hip::this_thread::get_fiber_id(); j < n; j += hip::this_thread::get_width()) {
+                        uint32_t idx = offset + j;
+                        int channel = (idx / ne0) % channels;
+                        float a_val = alpha[channel];
+                        float inv_b = 1.0f / beta[channel];
+                        
+                        float val = x[idx];
+                        float sin_ax = sinf(a_val * val);
+                        dst[idx] = val + inv_b * (sin_ax * sin_ax); 
+                    }
+                },
+                chunk_size, ne0, channels, original_src_data, original_alpha_data, original_beta_data, original_dst_data, offset);
+        }
+        
+        // Scope de autodestrucción y sincronización
+        for (auto &t : threads) {
+            t.join();
+        }
     }
 }
 

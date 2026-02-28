@@ -31,6 +31,7 @@ endif()
 find_package(Threads REQUIRED)
 find_package(rocprim REQUIRED CONFIG)
 find_package(rocthrust REQUIRED CONFIG)
+find_package(hipthreads REQUIRED)
 
 # GGML library paths
 set(GGML_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ggml")
@@ -131,6 +132,7 @@ target_link_libraries(audio_tokenizer_decoder PUBLIC
     ggml-base
     ggml-cpu
     Threads::Threads
+    hipthreads::hipthreads
 )
 
 # Qwen3 TTS library (full pipeline)
@@ -245,6 +247,24 @@ set_target_properties(test_decoder PROPERTIES
 target_link_libraries(test_decoder PRIVATE
     audio_tokenizer_decoder
     Threads::Threads
+    roc::rocthrust
+)
+
+# Test executable for hipThreads experimental revival
+add_executable(test_hipthreads
+    tests/test_hipthreads.hip
+)
+set_source_files_properties(tests/test_hipthreads.hip PROPERTIES LANGUAGE HIP)
+set_target_properties(test_hipthreads PROPERTIES 
+    HIP_SEPARABLE_COMPILATION ON
+    LINKER_LANGUAGE HIP
+)
+target_include_directories(test_hipthreads PRIVATE
+    ${GGML_DIR}/include
+)
+target_link_libraries(test_hipthreads PRIVATE
+    Threads::Threads
+    hipthreads::hipthreads
     roc::rocthrust
 )
 
