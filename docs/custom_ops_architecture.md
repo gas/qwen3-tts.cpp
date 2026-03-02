@@ -50,3 +50,26 @@ The architecture supports In-Context Learning (ICL) via `.q3vp` Voice Profiles.
 - These profiles inject a massive block of `k_cache`/`v_cache` data (the speaker's acoustic prompt) directly into the `TTSTransformer` state at Step 0.
 - Modifying the batching mechanism or the sampler kernel must account for the fact that Step 0 is processing hundreds of tokens simultaneously, relying heavily on `ggml_mul_mat` and `ggml_rope_ext` scaling.
 - If the batch size expands dynamically, the `q3vp` cache injection logic will fail unless the graph was explicitly allocated to handle `max_batch_size`.
+
+## 5. Implementation Plan: First-Class GGML Operation
+
+The only mathematically viable path to reach extreme synthesis speeds (RTF ~1.0) and bypass PCIe bandwidth bottlenecks is to integrate the GPU Sampler as a native, first-class operation within the GGML core.
+
+**Phase Execution Blueprint:**
+
+#### Step 1: The GGML Civil Registry (`ggml.h` and `ggml.c`)
+* **Task:** Add `GGML_OP_AUTOREGRESSIVE_SAMPLE` to the master operations enum. Create the public C definition `ggml_autoregressive_sample(ctx, logits)`.
+* **Risk (Low):** Standard C boilerplate.
+* **The Hidden Trap:** Inside `ggml.c`, there is a giant allocator function (`ggml_compute_forward` / `ggml_setup`) calculating the memory bytes required for every operation. We must explicitly define that our operation receives a `float` tensor (probabilities) and returns an `int32_t` tensor (the chosen token). Failing this byte translation guarantees an immediate Segfault.
+
+#### Step 2: Shape Inference & Planner Immunity
+* **Task:** GGML strictly verifies that an output node mathematically fits into the input of the next node. If our node outputs `[batch_size]`, the subsequent Embedding layer must be tailored to accept that exact shape.
+* **Risk (Medium-High):** GGML heavily relies on internal protections (`GGML_ASSERT`). If our new operation breaks the mathematical rules expected by the transformer layers, the program will crash instantly during initialization with an assertion error like `assert(ne0 == ne1) failed`.
+
+#### Step 3: The HIP/CUDA Kernel Integration (`ggml-cuda.cu` / `ggml-rocm.cpp`)
+* **Task:** Inject the working kernel (e.g., `hip_autoregressive_sampler_kernel`) inside the main GPU execution switch (`ggml_cuda_compute_forward`).
+* **Risk (High):** Raw GGML pointers (`src0->data`) and strides (`nb[1]`) are volatile. The arithmetic to jump to the correct token in the Prefill sequence (Step 0) vs. Decode (Step n) must be micro-managed to avoid reading out-of-bounds or old logits.
+
+#### Step 4: The CPU Fallback Trap (The Silent Killer)
+* **Task:** Implement a "dummy" or functional version of the CPU sampler in the core `ggml.c` loop, even if we solely intend to execute on the GPU.
+* **Risk (Critical):** If the GGML scheduler decides for any obscure reason (e.g., an unhandled tensor shape or type mismatch) that the GPU cannot evaluate our new node, **it will trigger a silent Fallback**. It will dynamically memory-copy the 800MB logit tensor to RAM, run the CPU sampler, and copy the `[1]` tensor back to VRAM. If this happens, the HIP Graph shatters, and the generation RTF will plummet to 20.0+ without giving any explicit compile or runtime error.
