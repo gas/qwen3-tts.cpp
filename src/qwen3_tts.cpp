@@ -101,7 +101,13 @@ static void resample_linear(const float * input, int input_len, int input_rate,
     }
 }
 
-Qwen3TTS::Qwen3TTS() = default;
+Qwen3TTS::Qwen3TTS() {
+#ifndef _WIN32
+    // Disable hipBLASLt internally to prevent ROCm stream capture errors 
+    // when using HIP static graphs for inference.
+    setenv("ROCBLAS_USE_HIPBLASLT", "0", 0); // 0 = Do NOT overwrite if set by user
+#endif
+}
 
 Qwen3TTS::~Qwen3TTS() = default;
 

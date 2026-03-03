@@ -138,7 +138,7 @@ add_library(qwen3_tts STATIC
     src/qwen3_tts.cpp
     src/voice_profile.cpp
 )
-set_source_files_properties(src/qwen3_tts.cpp PROPERTIES LANGUAGE HIP)
+set_source_files_properties(src/qwen3_tts.cpp src/voice_profile.cpp PROPERTIES LANGUAGE HIP)
 set_target_properties(qwen3_tts PROPERTIES 
     HIP_SEPARABLE_COMPILATION ON
     LINKER_LANGUAGE HIP
