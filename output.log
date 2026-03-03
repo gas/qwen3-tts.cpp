@@ -1,0 +1,31 @@
+Loading models from: models/
+  [mem] load/start               rss=80.36 MB  phys=80.36 MB
+Loading TTS model from models//qwen3-tts-0.6b-f16.gguf...
+Tokenizer IDs -> BOS: 151644, EOS: 151645, PAD: 151643, newline: 198, assistant: 77091
+  Text tokenizer loaded: vocab_size=151936 (90 ms)
+  [mem] load/after-tokenizer     rss=124.67 MB  phys=124.67 MB
+  Speaker encoder: deferred (lazy load)
+ggml_cuda_init: found 1 ROCm devices:
+  Device 0: AMD Radeon Graphics, gfx1201 (0x1201), VMM: no, Wave Size: 32
+  TTSTransformer backend: ROCm0
+  TTS transformer loaded: hidden_size=1024, n_layers=28 (544 ms)
+  [mem] load/after-transformer   rss=872.32 MB  phys=872.32 MB
+Loading vocoder from models//qwen3-tts-tokenizer-f16.gguf...
+  AudioTokenizerDecoder backend: ROCm0
+  Vocoder loaded: sample_rate=24000, n_codebooks=16 (116 ms)
+  [mem] load/after-vocoder       rss=872.32 MB  phys=872.32 MB
+All models loaded in 751 ms
+  [mem] load/end                 rss=872.32 MB  phys=872.32 MB
+
+Processing batch chunk 1/1 (texts 1 to 1)...
+Generating: 0/4096 tokensGenerating: 1/4096 tokensGenerating: 2/4096 tokensGenerating: 3/4096 tokensGenerating: 4/4096 tokensGenerating: 5/4096 tokensGenerating: 6/4096 tokensGenerating: 7/4096 tokensGenerating: 8/4096 tokensGenerating: 9/4096 tokensGenerating: 10/4096 tokensGenerating: 11/4096 tokensGenerating: 12/4096 tokensGenerating: 13/4096 tokensGenerating: 14/4096 tokensGenerating: 15/4096 tokensGenerating: 16/4096 tokensGenerating: 17/4096 tokensGenerating: 18/4096 tokensGenerating: 19/4096 tokensGenerating: 20/4096 tokensGenerating: 21/4096 tokensGenerating: 22/4096 tokensGenerating: 23/4096 tokensGenerating: 24/4096 tokensGenerating: 25/4096 tokensGenerating: 26/4096 tokensGenerating: 27/4096 tokensGenerating: 28/4096 tokensGenerating: 29/4096 tokensGenerating: 30/4096 tokensGenerating: 31/4096 tokensGenerating: 32/4096 tokensGenerating: 33/4096 tokensGenerating: 34/4096 tokensGenerating: 35/4096 tokensGenerating: 36/4096 tokensGenerating: 37/4096 tokensGenerating: 38/4096 tokensGenerating: 39/4096 tokensGenerating: 40/4096 tokensGenerating: 41/4096 tokensGenerating: 42/4096 tokensGenerating: 43/4096 tokensGenerating: 44/4096 tokensGenerating: 45/4096 tokensGenerating: 46/4096 tokensGenerating: 47/4096 tokensGenerating: 48/4096 tokensGenerating: 49/4096 tokensGenerating: 50/4096 tokensGenerating: 51/4096 tokensGenerating: 52/4096 tokensGenerating: 53/4096 tokensGenerating: 54/4096 tokensGenerating: 55/4096 tokensGenerating: 56/4096 tokensGenerating: 57/4096 tokensGenerating: 58/4096 tokensGenerating: 59/4096 tokensGenerating: 60/4096 tokensGenerating: 61/4096 tokensGenerating: 62/4096 tokensGenerating: 63/4096 tokensGenerating: 64/4096 tokensGenerating: 65/4096 tokensGenerating: 66/4096 tokensGenerating: 67/4096 tokensGenerating: 68/4096 tokensGenerating: 69/4096 tokensGenerating: 70/4096 tokensGenerating: 71/4096 tokensGenerating: 72/4096 tokensGenerating: 73/4096 tokensOutput 1 saved to: output.wav (1.04 seconds)
+
+Timing (Sequence 1):
+  Load:           0 ms
+  Tokenize:       0 ms
+  Encode:         0 ms
+  Generate:  103841 ms
+  Decode:       879 ms
+  Total:     104720 ms
+  RTF:           100.692
+  RSS peak:      1148.97 MB

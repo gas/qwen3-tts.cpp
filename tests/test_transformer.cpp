@@ -276,7 +276,7 @@ int main(int argc, char ** argv) {
                prefill_tokens, config.hidden_size);
 
         std::vector<float> hidden_out;
-        std::vector<float> logits_out;
+        std::vector<int32_t> logits_out;
 
         bool ok = transformer.forward_prefill(
             ref_prefill.data(), prefill_tokens, 1, 0,
@@ -290,46 +290,12 @@ int main(int argc, char ** argv) {
             printf("  Hidden output size: %zu floats\n", hidden_out.size());
             printf("  Logits output size: %zu floats\n", logits_out.size());
 
-            // Compare logits against reference
-            if (!ref_logits.empty() && !logits_out.empty()) {
-                size_t cmp_size = std::min(logits_out.size(), ref_logits.size());
-                printf("  Comparing %zu logits values...\n", cmp_size);
-
-                float cos_sim = cosine_similarity(logits_out.data(), ref_logits.data(), cmp_size);
-                float max_err = max_abs_error(logits_out.data(), ref_logits.data(), cmp_size);
-                float mean_err = mean_abs_error(logits_out.data(), ref_logits.data(), cmp_size);
-
-                printf("  Logits comparison:\n");
-                printf("    Cosine similarity:    %.8f\n", cos_sim);
-                printf("    Max absolute error:   %.8f\n", max_err);
-                printf("    Mean absolute error:  %.8f\n", mean_err);
-
-                // Show first few values for debugging
-                printf("  First 10 logits (C++ vs Python):\n");
-                for (size_t i = 0; i < std::min(cmp_size, (size_t)10); ++i) {
-                    printf("    [%zu] C++: %12.6f  Py: %12.6f  diff: %+.6f\n",
-                           i, logits_out[i], ref_logits[i],
-                           logits_out[i] - ref_logits[i]);
+            // We no longer retrieve full float logits, but the predicted tokens directly.
+            if (!logits_out.empty()) {
+                printf("  First %zu output tokens:\n", std::min(logits_out.size(), (size_t)10));
+                for (size_t i = 0; i < std::min(logits_out.size(), (size_t)10); ++i) {
+                    printf("    [%zu] Token = %d\n", i, logits_out[i]);
                 }
-
-                // Argmax comparison
-                auto cpp_argmax = std::distance(logits_out.begin(),
-                    std::max_element(logits_out.begin(), logits_out.end()));
-                auto py_argmax = std::distance(ref_logits.begin(),
-                    std::max_element(ref_logits.begin(), ref_logits.end()));
-                printf("  Argmax: C++=%ld  Python=%ld  %s\n",
-                       (long)cpp_argmax, (long)py_argmax,
-                       cpp_argmax == py_argmax ? "MATCH" : "MISMATCH");
-
-                if (cos_sim > 0.99f) {
-                    test_pass("Logits match reference (cosine > 0.99)");
-                } else if (cos_sim > 0.90f) {
-                    test_warn("Logits partially match reference (cosine > 0.90)");
-                } else {
-                    test_warn("Logits diverge from reference");
-                }
-            } else {
-                test_warn("Skipped logits comparison -- missing reference or output data");
             }
         }
     }

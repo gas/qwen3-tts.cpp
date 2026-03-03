@@ -235,19 +235,21 @@ public:
     // For batch prefill where prefill_embd is [hidden_size, n_tokens, batch_size]
     bool forward_prefill(const float * prefill_embd, int32_t n_tokens, int32_t batch_size,
                          int32_t n_past, std::vector<float> & output,
-                         std::vector<float> * logits_out = nullptr,
-                         const float * attn_mask_inf = nullptr);
+                         std::vector<int32_t> * logits_out = nullptr,
+                         const float * attn_mask_inf = nullptr,
+                         float temperature = 0.9f, int32_t top_k = 50, unsigned int seed = 42);
     
     // Forward pass for codec tokens (generation phase)
     // codec_token: single codec token for first codebook
     // n_past: number of tokens already in KV cache
     // output: logits for next codec token [codec_vocab_size]
     bool forward_codec(int32_t codec_token, int32_t n_past, int32_t batch_size,
-                       std::vector<float> & output);
+                       std::vector<int32_t> & output);
 
     bool forward_step(const float * step_embd, int32_t n_past, int32_t batch_size,
-                      std::vector<float> & output,
-                      std::vector<float> * hidden_out = nullptr);
+                      std::vector<int32_t> & output,
+                      std::vector<float> * hidden_out = nullptr,
+                      float temperature = 0.9f, int32_t top_k = 50, unsigned int seed = 42);
     
     // Get hidden states from last forward pass (for code predictor)
     bool get_hidden_states(std::vector<float> & hidden) const;
@@ -325,9 +327,9 @@ private:
                              std::vector<float> & trailing_text_hidden,
                              std::vector<float> & tts_pad_embed);
 
-    struct ggml_cgraph * build_prefill_forward_graph(int32_t n_tokens, int32_t n_past, bool use_attn_mask = false, int32_t batch_size = 1);
+    struct ggml_cgraph * build_prefill_forward_graph(int32_t n_tokens, int32_t n_past, bool use_attn_mask = false, int32_t batch_size = 1, float temperature = 0.9f, int32_t top_k = 50, unsigned int seed = 42);
 
-    struct ggml_cgraph * build_step_graph(int32_t n_past, int32_t batch_size = 1);
+    struct ggml_cgraph * build_step_graph(int32_t n_past, int32_t batch_size = 1, float temperature = 0.9f, int32_t top_k = 50, unsigned int seed = 42);
 
     bool project_text_tokens(const int32_t * text_tokens, int32_t n_tokens,
                              std::vector<float> & output);
@@ -344,11 +346,11 @@ private:
     // Build computation graph for single-step autoregressive code predictor
     // n_past: number of tokens already in KV cache (0-14)
     // generation_step: which codebook we're predicting (0-14)
-    struct ggml_cgraph * build_code_pred_step_graph(int32_t n_past, int32_t generation_step, int32_t batch_size = 1);
+    struct ggml_cgraph * build_code_pred_step_graph(int32_t n_past, int32_t generation_step, int32_t batch_size = 1, float temperature = 0.9f, int32_t top_k = 50, unsigned int seed = 42);
     
     // Build computation graph for 2-token prefill of code predictor
     // Processes [past_hidden, codec_embd(codebook_0_token)] together
-    struct ggml_cgraph * build_code_pred_prefill_graph(int32_t batch_size = 1);
+    struct ggml_cgraph * build_code_pred_prefill_graph(int32_t batch_size = 1, float temperature = 0.9f, int32_t top_k = 50, unsigned int seed = 42);
     
     // Parse hyperparameters from GGUF
     bool parse_config(struct gguf_context * ctx);

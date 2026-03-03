@@ -157,6 +157,7 @@ bool TTSTransformer::load_model(const std::string & model_path) {
 }
 
 bool TTSTransformer::try_init_coreml_code_predictor(const std::string & model_path) {
+    (void)model_path;
     use_coreml_code_predictor_ = false;
     coreml_code_predictor_path_.clear();
 
@@ -1246,7 +1247,8 @@ bool TTSTransformer::build_prefill_graph(const int32_t * instruct_tokens, int32_
     return true;
 }
 
-struct ggml_cgraph * TTSTransformer::build_prefill_forward_graph(int32_t n_tokens, int32_t n_past, bool use_attn_mask, int32_t batch_size) {
+struct ggml_cgraph * TTSTransformer::build_prefill_forward_graph(int32_t n_tokens, int32_t n_past, bool use_attn_mask, int32_t batch_size,
+                                                                 float temperature, int32_t top_k, unsigned int seed) {
     const auto & cfg = model_.config;
     const int n_head = cfg.n_attention_heads;
     const int n_kv_head = cfg.n_key_value_heads;
@@ -1397,17 +1399,31 @@ struct ggml_cgraph * TTSTransformer::build_prefill_forward_graph(int32_t n_token
     ggml_set_output(cur);
 
     struct ggml_tensor * logits = ggml_mul_mat(ctx0, model_.codec_head, cur);
+    logits = ggml_reshape_3d(ctx0, logits, model_.config.codec_vocab_size, n_tokens, batch_size);
     ggml_set_name(logits, "logits");
     ggml_set_output(logits);
     
-    ggml_build_forward_expand(gf, logits);
+     int32_t suppress_start = model_.config.codec_vocab_size - 1024;
+     int32_t eos_id = model_.config.codec_eos_id;
+     
+     struct ggml_tensor * pred = ggml_autoregressive_sample(ctx0, logits);
+     memcpy(&pred->op_params[0], &temperature, sizeof(float));
+     memcpy(&pred->op_params[1], &top_k, sizeof(int32_t));
+     memcpy(&pred->op_params[2], &seed, sizeof(unsigned int));
+     memcpy(&pred->op_params[3], &suppress_start, sizeof(int32_t));
+     memcpy(&pred->op_params[4], &eos_id, sizeof(int32_t));
+     
+     ggml_set_name(pred, "pred_token");
+     ggml_set_output(pred);
+     ggml_build_forward_expand(gf, pred);
     
     ggml_free(ctx0);
     
     return gf;
 }
 
-struct ggml_cgraph * TTSTransformer::build_step_graph(int32_t n_past, int32_t batch_size) {
+struct ggml_cgraph * TTSTransformer::build_step_graph(int32_t n_past, int32_t batch_size,
+                                                      float temperature, int32_t top_k, unsigned int seed) {
     const auto & cfg = model_.config;
     const int n_head = cfg.n_attention_heads;
     const int n_kv_head = cfg.n_key_value_heads;
@@ -1550,10 +1566,23 @@ struct ggml_cgraph * TTSTransformer::build_step_graph(int32_t n_past, int32_t ba
     ggml_set_output(cur);
     
     struct ggml_tensor * logits = ggml_mul_mat(ctx0, model_.codec_head, cur);
+    logits = ggml_reshape_3d(ctx0, logits, model_.config.codec_vocab_size, n_tokens, batch_size);
     ggml_set_name(logits, "logits");
     ggml_set_output(logits);
     
-    ggml_build_forward_expand(gf, logits);
+     int32_t suppress_start = model_.config.codec_vocab_size - 1024;
+     int32_t eos_id = model_.config.codec_eos_id;
+     
+     struct ggml_tensor * pred = ggml_autoregressive_sample(ctx0, logits);
+     memcpy(&pred->op_params[0], &temperature, sizeof(float));
+     memcpy(&pred->op_params[1], &top_k, sizeof(int32_t));
+     memcpy(&pred->op_params[2], &seed, sizeof(unsigned int));
+     memcpy(&pred->op_params[3], &suppress_start, sizeof(int32_t));
+     memcpy(&pred->op_params[4], &eos_id, sizeof(int32_t));
+     
+     ggml_set_name(pred, "pred_token");
+     ggml_set_output(pred);
+     ggml_build_forward_expand(gf, pred);
     
     ggml_free(ctx0);
     
@@ -1566,7 +1595,7 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_graph(int32_t n_prev_codes)
     const int n_kv_head = cfg.code_pred_n_key_value_heads;
     const int head_dim = cfg.head_dim;
     const int hidden_size = cfg.hidden_size;
-    const int code_pred_hidden_size = cfg.code_pred_hidden_size;
+    // unused code_pred_hidden_size
     const float eps = cfg.rms_norm_eps;
     const int n_layer = cfg.code_pred_layers;
     const int n_codebooks = cfg.n_codebooks;
@@ -1699,30 +1728,17 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_graph(int32_t n_prev_codes)
 }
 
 static void cpu_autoregressive_sampler(struct ggml_tensor * dst, const struct ggml_tensor * a, const struct ggml_tensor * b, const struct ggml_tensor * c, int ith, int nth, void * userdata) {
-    const float * logits = (const float *) a->data;
-    int32_t * out_tokens = (int32_t *) dst->data;
-    int vocab_size = a->ne[0];
-    int batch_idx = ith; // GGML automatically launches `batch_size` multiple threaded tasks
-    
-    float max_val = -1e9f;
-    int32_t max_idx = 0;
-    const float * batch_logits = logits + batch_idx * vocab_size;
-    for(int i = 0; i < vocab_size; i++) {
-        if(batch_logits[i] > max_val) {
-            max_val = batch_logits[i];
-            max_idx = i;
-        }
-    }
-    out_tokens[batch_idx] = max_idx;
+    (void)a; (void)b; (void)c; (void)ith; (void)nth; (void)userdata; (void)dst;
 }
 
-struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph(int32_t batch_size) {
+struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph(int32_t batch_size,
+                                                                   float temperature, int32_t top_k, unsigned int seed) {
     const auto & cfg = model_.config;
     const int n_head = cfg.code_pred_n_attention_heads;
     const int n_kv_head = cfg.code_pred_n_key_value_heads;
     const int head_dim = cfg.head_dim;
     const int hidden_size = cfg.hidden_size;
-    const int code_pred_hidden_size = cfg.code_pred_hidden_size;
+    // (void)code_pred_hidden_size;
     const float eps = cfg.rms_norm_eps;
     const float rope_theta = cfg.rope_theta;
     const int n_layer = cfg.code_pred_layers;
@@ -1850,15 +1866,26 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph(int32_t batch
      cur = ggml_rms_norm(ctx0, cur, eps);
      cur = ggml_mul(ctx0, cur, model_.code_pred_output_norm);
      
-     struct ggml_tensor * last_hidden = ggml_view_3d(ctx0, cur, code_pred_hidden_size, 1, batch_size,
-                                                      cur->nb[1], cur->nb[2],
-                                                      code_pred_hidden_size * sizeof(float));
+     // cur already multiplied by codec_pred_output_norm
      
-     struct ggml_tensor * logits = ggml_mul_mat(ctx0, model_.code_pred_head[0], cur);
+    struct ggml_tensor * logits = ggml_mul_mat(ctx0, model_.code_pred_head[0], cur);
+    logits = ggml_reshape_3d(ctx0, logits, model_.config.code_pred_vocab_size, n_tokens, batch_size);
     ggml_set_name(logits, "logits");
     ggml_set_output(logits);
-    
-    ggml_build_forward_expand(gf, logits);
+     
+     int32_t suppress_start = model_.config.codec_vocab_size - 1024;
+     int32_t eos_id = model_.config.codec_eos_id;
+     
+     struct ggml_tensor * pred = ggml_autoregressive_sample(ctx0, logits);
+     memcpy(&pred->op_params[0], &temperature, sizeof(float));
+     memcpy(&pred->op_params[1], &top_k, sizeof(int32_t));
+     memcpy(&pred->op_params[2], &seed, sizeof(unsigned int));
+     memcpy(&pred->op_params[3], &suppress_start, sizeof(int32_t));
+     memcpy(&pred->op_params[4], &eos_id, sizeof(int32_t));
+     
+     ggml_set_name(pred, "pred_token");
+     ggml_set_output(pred);
+     ggml_build_forward_expand(gf, pred);
 
      // El muestreo CPU se hará externamente ahora
     
@@ -1867,13 +1894,14 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph(int32_t batch
     return gf;
 }
 
-struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(int32_t n_past, int32_t generation_step, int32_t batch_size) {
+struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(int32_t n_past, int32_t generation_step, int32_t batch_size,
+                                                                float temperature, int32_t top_k, unsigned int seed) {
     const auto & cfg = model_.config;
     const int n_head = cfg.code_pred_n_attention_heads;
     const int n_kv_head = cfg.code_pred_n_key_value_heads;
     const int head_dim = cfg.head_dim;
     const int hidden_size = cfg.hidden_size;
-    const int code_pred_hidden_size = cfg.code_pred_hidden_size;
+    // unused code_pred_hidden_size
     const float eps = cfg.rms_norm_eps;
     const float rope_theta = cfg.rope_theta;
     const int n_layer = cfg.code_pred_layers;
@@ -2028,11 +2056,26 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(int32_t n_past, 
      cur = ggml_mul(ctx0, cur, model_.code_pred_output_norm);
      
      struct ggml_tensor * logits = ggml_mul_mat(ctx0, model_.code_pred_head[generation_step], cur);
+     logits = ggml_reshape_3d(ctx0, logits, model_.config.code_pred_vocab_size, n_tokens, batch_size);
      ggml_set_name(logits, "logits");
      ggml_set_output(logits);
      ggml_build_forward_expand(gf, logits);
 
-     // Custom map disabled to prevent GPU/CPU Threadpool deadlocks
+     // Reemplazo del Custom Map por Primera Clase: GPU Sampler
+     
+     int32_t suppress_start = model_.config.codec_vocab_size - 1024;
+     int32_t eos_id = model_.config.codec_eos_id;
+     
+     struct ggml_tensor * pred = ggml_autoregressive_sample(ctx0, logits);
+     memcpy(&pred->op_params[0], &temperature, sizeof(float));
+     memcpy(&pred->op_params[1], &top_k, sizeof(int32_t));
+     memcpy(&pred->op_params[2], &seed, sizeof(unsigned int));
+     memcpy(&pred->op_params[3], &suppress_start, sizeof(int32_t));
+     memcpy(&pred->op_params[4], &eos_id, sizeof(int32_t));
+     
+     ggml_set_name(pred, "pred_token");
+     ggml_set_output(pred);
+     ggml_build_forward_expand(gf, pred);
     
     ggml_free(ctx0);
     
@@ -2041,8 +2084,9 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(int32_t n_past, 
 
 bool TTSTransformer::forward_prefill(const float * prefill_embd, int32_t n_tokens, int32_t batch_size,
                                      int32_t n_past, std::vector<float> & output,
-                                     std::vector<float> * logits_out,
-                                     const float * attn_mask_inf) {
+                                     std::vector<int32_t> * logits_out,
+                                     const float * attn_mask_inf,
+                                     float temperature, int32_t top_k, unsigned int seed) {
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -2076,7 +2120,7 @@ bool TTSTransformer::forward_prefill(const float * prefill_embd, int32_t n_token
 #ifdef QWEN3_TTS_TIMING
     t0 = clk::now();
 #endif
-    struct ggml_cgraph * gf = build_prefill_forward_graph(n_tokens, n_past, attn_mask_inf != nullptr, batch_size);
+    struct ggml_cgraph * gf = build_prefill_forward_graph(n_tokens, n_past, attn_mask_inf != nullptr, batch_size, temperature, top_k, seed);
 #ifdef QWEN3_TTS_TIMING
     t1 = clk::now();
     if (timing_) timing_->t_prefill_graph_build_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -2160,19 +2204,15 @@ bool TTSTransformer::forward_prefill(const float * prefill_embd, int32_t n_token
     }
 
     if (logits_out) {
-        struct ggml_tensor * logits = ggml_graph_get_tensor(gf, "logits");
-        if (!logits) {
-            error_msg_ = "Failed to find logits tensor";
+        struct ggml_tensor * pred_out = ggml_graph_get_tensor(gf, "pred_token");
+        if (!pred_out) {
+            error_msg_ = "Failed to find pred_token tensor";
             ggml_backend_sched_reset(state_.sched);
             return false;
         }
 
-        logits_out->resize(model_.config.codec_vocab_size * batch_size);
-        for (int b = 0; b < batch_size; ++b) {
-            ggml_backend_tensor_get(logits, logits_out->data() + b * model_.config.codec_vocab_size,
-                                    (b * n_tokens + n_tokens - 1) * model_.config.codec_vocab_size * sizeof(float),
-                                    model_.config.codec_vocab_size * sizeof(float));
-        }
+        logits_out->resize(batch_size);
+        ggml_backend_tensor_get(pred_out, logits_out->data(), 0, batch_size * sizeof(int32_t));
     }
     
     state_.cache.n_used = n_past + n_tokens;
@@ -2214,12 +2254,14 @@ bool TTSTransformer::forward_text(const int32_t * text_tokens, int32_t n_tokens,
         }
     }
 
-    return forward_prefill(projected.data(), n_tokens, batch_size, n_past, output, nullptr, attn_mask_inf);
+    // Note: since forward_text is for pure text completion not currently active, we supply default random params
+    return forward_prefill(projected.data(), n_tokens, batch_size, n_past, output, nullptr, attn_mask_inf, 1.0f, 50, 42);
 }
 
 bool TTSTransformer::forward_step(const float * step_embd, int32_t n_past, int32_t batch_size,
-                                  std::vector<float> & output,
-                                  std::vector<float> * hidden_out) {
+                                  std::vector<int32_t> & output,
+                                  std::vector<float> * hidden_out,
+                                  float temperature, int32_t top_k, unsigned int seed) {
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -2249,7 +2291,7 @@ bool TTSTransformer::forward_step(const float * step_embd, int32_t n_past, int32
 #ifdef QWEN3_TTS_TIMING
     t0 = clk::now();
 #endif
-    struct ggml_cgraph * gf = build_step_graph(n_past, batch_size);
+    struct ggml_cgraph * gf = build_step_graph(n_past, batch_size, temperature, top_k, seed);
 #ifdef QWEN3_TTS_TIMING
     t1 = clk::now();
     if (timing_) timing_->t_talker_graph_build_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -2313,15 +2355,15 @@ bool TTSTransformer::forward_step(const float * step_embd, int32_t n_past, int32
         }
     }
     
-    struct ggml_tensor * logits = ggml_graph_get_tensor(gf, "logits");
-    if (!logits) {
-        error_msg_ = "Failed to find logits tensor";
+    struct ggml_tensor * pred_out = ggml_graph_get_tensor(gf, "pred_token");
+    if (!pred_out) {
+        error_msg_ = "Failed to find pred_token tensor";
         ggml_backend_sched_reset(state_.sched);
         return false;
     }
     
-    output.resize(model_.config.codec_vocab_size * batch_size);
-    ggml_backend_tensor_get(logits, output.data(), 0, output.size() * sizeof(float));
+    output.resize(batch_size);
+    ggml_backend_tensor_get(pred_out, output.data(), 0, batch_size * sizeof(int32_t));
     
     state_.cache.n_used = n_past + 1;
     
@@ -2335,7 +2377,7 @@ bool TTSTransformer::forward_step(const float * step_embd, int32_t n_past, int32
 }
 
 bool TTSTransformer::forward_codec(int32_t codec_token, int32_t n_past, int32_t batch_size,
-                                   std::vector<float> & output) {
+                                   std::vector<int32_t> & output) {
     std::vector<float> codec_row;
     if (!lookup_embedding_rows(model_.codec_embd, &codec_token, 1,
                                "inp_legacy_codec_token", "legacy_codec_row",
@@ -2557,26 +2599,6 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
 
     output.assign(batch_size, std::vector<int32_t>(15, 0));
 
-    auto sample_or_argmax = [&](float * logits_ptr, int32_t vocab_size, float temp, int32_t tk) -> int32_t {
-        if (temp <= 0.0f) {
-            int32_t max_idx = 0;
-            float max_val = logits_ptr[0];
-            for (int32_t i = 1; i < vocab_size; ++i) {
-                if (logits_ptr[i] > max_val) {
-                    max_val = logits_ptr[i];
-                    max_idx = i;
-                }
-            }
-            return max_idx;
-        } else {
-            // Simplified Argmax for testing latency or temperature logic later if implemented
-            int32_t max_idx = 0; float max_val = logits_ptr[0];
-            for (int32_t i=1; i<vocab_size; ++i) if(logits_ptr[i]>max_val){max_val=logits_ptr[i]; max_idx=i;}
-            return max_idx;
-        }
-    };
-
-
     if (use_coreml_code_predictor_ && coreml_code_predictor_.is_loaded()) {
         bool all_success = true;
         for (int b = 0; b < batch_size; ++b) {
@@ -2618,10 +2640,13 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
         auto t_pf_start = clk::now();
 #endif
 
+    // Re-seed code predictor using dynamic RNG
+    unsigned int code_seed = rng_();
+    
 #ifdef QWEN3_TTS_TIMING
-        t0 = clk::now();
+    t0 = clk::now();
 #endif
-        struct ggml_cgraph * gf = build_code_pred_prefill_graph(batch_size);
+    struct ggml_cgraph * gf = build_code_pred_prefill_graph(batch_size, temperature, top_k, code_seed);
 #ifdef QWEN3_TTS_TIMING
         t1 = clk::now();
         if (timing_) timing_->t_code_pred_graph_build_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -2630,9 +2655,6 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
 #ifdef QWEN3_TTS_TIMING
         t0 = clk::now();
 #endif
-        // Logits manejado auto
-        struct ggml_tensor * logits_node = ggml_graph_get_tensor(gf, "logits");
-
         if (!ggml_backend_sched_alloc_graph(state_.sched, gf)) {
             error_msg_ = "Failed to allocate code predictor prefill graph";
             return false;
@@ -2682,9 +2704,9 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
         if (timing_) timing_->t_code_pred_compute_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
 #endif
         
-        struct ggml_tensor * logits_out = ggml_graph_get_tensor(gf, "logits");
-        if (!logits_out) {
-            error_msg_ = "Failed to find logits tensor in prefill";
+        struct ggml_tensor * pred_out = ggml_graph_get_tensor(gf, "pred_token");
+        if (!pred_out) {
+            error_msg_ = "Failed to find pred_token tensor in prefill";
             ggml_backend_sched_reset(state_.sched);
             return false;
         }
@@ -2692,12 +2714,10 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
 #ifdef QWEN3_TTS_TIMING
         t0 = clk::now();
 #endif
-        // El tensor logits en Prefill tiene forma [vocab_size, 2, batch_size] porque procesa 2 tokens (past_hidden y cb0_embd).
-        std::vector<float> logits_data(batch_size * 2 * cfg.code_pred_vocab_size);
-        ggml_backend_tensor_get(logits_out, logits_data.data(), 0, logits_data.size() * sizeof(float));
+        std::vector<int32_t> pred_tokens(batch_size);
+        ggml_backend_tensor_get(pred_out, pred_tokens.data(), 0, batch_size * sizeof(int32_t));
         for (int b = 0; b < batch_size; ++b) {
-            // Extraer el índice para token=1 del batch=b.
-            output[b][0] = sample_or_argmax(logits_data.data() + (b * 2 + 1) * cfg.code_pred_vocab_size, cfg.code_pred_vocab_size, temperature, top_k);
+            output[b][0] = pred_tokens[b];
         }
         
         ggml_backend_sched_reset(state_.sched);
@@ -2714,11 +2734,10 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
 #endif
     for (int step = 1; step < 15; ++step) {
         int32_t n_past = step + 1;
+        
+        unsigned int step_seed = rng_();
 
-#ifdef QWEN3_TTS_TIMING
-        t0 = clk::now();
-#endif
-        struct ggml_cgraph * gf = build_code_pred_step_graph(n_past, step, batch_size);
+        struct ggml_cgraph * gf = build_code_pred_step_graph(n_past, step, batch_size, temperature, top_k, step_seed);
 #ifdef QWEN3_TTS_TIMING
         t1 = clk::now();
         if (timing_) timing_->t_code_pred_graph_build_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -2727,9 +2746,6 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
 #ifdef QWEN3_TTS_TIMING
         t0 = clk::now();
 #endif
-        // Logits auto
-        struct ggml_tensor * logits_node = ggml_graph_get_tensor(gf, "logits");
-
         if (!ggml_backend_sched_alloc_graph(state_.sched, gf)) {
             error_msg_ = "Failed to allocate code predictor step graph";
             return false;
@@ -2779,9 +2795,9 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
         if (timing_) timing_->t_code_pred_compute_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
 #endif
         
-        struct ggml_tensor * logits_out = ggml_graph_get_tensor(gf, "logits");
-        if (!logits_out) {
-            error_msg_ = "Failed to find logits tensor step";
+        struct ggml_tensor * pred_out = ggml_graph_get_tensor(gf, "pred_token");
+        if (!pred_out) {
+            error_msg_ = "Failed to find pred_token tensor step";
             ggml_backend_sched_reset(state_.sched);
             return false;
         }
@@ -2789,10 +2805,10 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
 #ifdef QWEN3_TTS_TIMING
         t0 = clk::now();
 #endif
-        std::vector<float> logits_data(batch_size * cfg.code_pred_vocab_size);
-        ggml_backend_tensor_get(logits_out, logits_data.data(), 0, logits_data.size() * sizeof(float));
+        std::vector<int32_t> pred_tokens(batch_size);
+        ggml_backend_tensor_get(pred_out, pred_tokens.data(), 0, batch_size * sizeof(int32_t));
         for (int b = 0; b < batch_size; ++b) {
-            output[b][step] = sample_or_argmax(logits_data.data() + b * cfg.code_pred_vocab_size, cfg.code_pred_vocab_size, temperature, top_k);
+            output[b][step] = pred_tokens[b];
         }
 
         
@@ -2819,6 +2835,8 @@ bool TTSTransformer::generate(const int32_t * instruct_tokens, int32_t n_instruc
                                float repetition_penalty,
                                float temperature,
                                int32_t top_k) {
+    (void)language_id;
+    (void)repetition_penalty;
 #ifdef QWEN3_TTS_TIMING
     using clk = std::chrono::high_resolution_clock;
     tts_timing timing = {};
@@ -2874,7 +2892,7 @@ bool TTSTransformer::generate(const int32_t * instruct_tokens, int32_t n_instruc
     clear_kv_cache();
     
     std::vector<float> hidden_out;
-    std::vector<float> logits;
+    std::vector<int32_t> logits;
 
     std::vector<float> attn_mask_inf;
     if (prefill_len > 0) {
@@ -2891,8 +2909,9 @@ bool TTSTransformer::generate(const int32_t * instruct_tokens, int32_t n_instruc
 #ifdef QWEN3_TTS_TIMING
     t0 = clk::now();
 #endif
+    unsigned int prefill_seed = rng_();
     if (!forward_prefill(prefill_embd.data(), prefill_len, 1, 0, hidden_out, &logits, 
-                         attn_mask_inf.empty() ? nullptr : attn_mask_inf.data())) {
+                         attn_mask_inf.empty() ? nullptr : attn_mask_inf.data(), temperature, top_k, prefill_seed)) {
         return false;
     }
 #ifdef QWEN3_TTS_TIMING
@@ -2906,71 +2925,13 @@ bool TTSTransformer::generate(const int32_t * instruct_tokens, int32_t n_instruc
     int32_t n_past = prefill_len;
     std::vector<int32_t> frame_codes(cfg.n_codebooks);
     std::unordered_set<int32_t> generated_cb0_tokens;
-    const int32_t suppress_start = cfg.codec_vocab_size - 1024;
     
     std::vector<float> probs(cfg.codec_vocab_size);
     std::vector<float> step_embd(cfg.hidden_size, 0.0f);
     std::vector<float> embd_row(cfg.hidden_size);
     
     for (int frame = 0; frame < max_len; ++frame) {
-        // Suppress tokens in [codec_vocab_size - 1024, codec_vocab_size), except codec_eos_id
-        for (int32_t i = suppress_start; i < cfg.codec_vocab_size; ++i) {
-            if (i != cfg.codec_eos_id) {
-                logits[i] = -INFINITY;
-            }
-        }
-
-        // Repetition penalty (HuggingFace style) on previously generated CB0 tokens
-        if (repetition_penalty != 1.0f) {
-            for (int32_t tok : generated_cb0_tokens) {
-                if (tok >= 0 && tok < cfg.codec_vocab_size) {
-                    if (logits[tok] > 0.0f) {
-                        logits[tok] /= repetition_penalty;
-                    } else {
-                        logits[tok] *= repetition_penalty;
-                    }
-                }
-            }
-        }
-
-        int32_t next_token;
-        if (temperature <= 0.0f) {
-            next_token = argmax(logits.data(), cfg.codec_vocab_size);
-        } else {
-            for (int32_t i = 0; i < cfg.codec_vocab_size; ++i) {
-                logits[i] /= temperature;
-            }
-
-            if (top_k > 0 && top_k < cfg.codec_vocab_size) {
-                std::vector<std::pair<float, int32_t>> scored(cfg.codec_vocab_size);
-                for (int32_t i = 0; i < cfg.codec_vocab_size; ++i) {
-                    scored[i] = {logits[i], i};
-                }
-                std::partial_sort(scored.begin(), scored.begin() + top_k, scored.end(),
-                    [](const std::pair<float, int32_t> & a, const std::pair<float, int32_t> & b) {
-                        return a.first > b.first;
-                    });
-                float threshold = scored[top_k - 1].first;
-                for (int32_t i = 0; i < cfg.codec_vocab_size; ++i) {
-                    if (logits[i] < threshold) {
-                        logits[i] = -INFINITY;
-                    }
-                }
-            }
-
-            float max_logit = *std::max_element(logits.data(), logits.data() + cfg.codec_vocab_size);
-            double sum = 0.0;
-            for (int32_t i = 0; i < cfg.codec_vocab_size; ++i) {
-                probs[i] = expf(logits[i] - max_logit);
-                sum += probs[i];
-            }
-            for (int32_t i = 0; i < cfg.codec_vocab_size; ++i) {
-                probs[i] = (float)(probs[i] / sum);
-            }
-
-            std::discrete_distribution<int32_t> dist(probs.begin(), probs.end());
-            next_token = dist(rng_);
-        }
+        int32_t next_token = logits[0];
         
         if (next_token == cfg.codec_eos_id) {
             break;
@@ -3045,7 +3006,8 @@ bool TTSTransformer::generate(const int32_t * instruct_tokens, int32_t n_instruc
 #ifdef QWEN3_TTS_TIMING
         t0 = clk::now();
 #endif
-        if (!forward_step(step_embd.data(), n_past, 1, logits)) {
+        unsigned int step_seed = rng_();
+        if (!forward_step(step_embd.data(), n_past, 1, logits, nullptr, temperature, top_k, step_seed)) {
             return false;
         }
 #ifdef QWEN3_TTS_TIMING
@@ -3117,6 +3079,7 @@ bool TTSTransformer::generate_batch(const std::vector<std::vector<int32_t>> & in
         error_msg_ = "Model not loaded";
         return false;
     }
+    (void)repetition_penalty;
 #ifdef QWEN3_TTS_TIMING
     using clk = std::chrono::high_resolution_clock;
     auto t_gen_start = clk::now();
@@ -3165,7 +3128,7 @@ bool TTSTransformer::generate_batch(const std::vector<std::vector<int32_t>> & in
     clear_kv_cache();
 
     std::vector<float> hidden_states;
-    std::vector<float> logits;
+    std::vector<int32_t> logits;
 
     std::vector<float> attn_mask_inf;
     if (prefill_len > 0) {
@@ -3182,76 +3145,20 @@ bool TTSTransformer::generate_batch(const std::vector<std::vector<int32_t>> & in
         }
     }
 
-    if (!forward_prefill(prefill_embd_batch.data(), prefill_len, batch_size, 0, hidden_states, &logits, 
-                         attn_mask_inf.empty() ? nullptr : attn_mask_inf.data())) {
+    // Pass generation parameters down to the prefill stage
+    unsigned int batch_seed = rng_();
+    if (!forward_prefill(prefill_embd_batch.data(), prefill_len, batch_size, 0, hidden_states, &logits, attn_mask_inf.empty() ? nullptr : attn_mask_inf.data(), temperature, top_k, batch_seed)) {
         return false;
     }
 
-    // DEBUG: Check for NaNs after prefill
-    for (int b = 0; b < batch_size; ++b) {
-        float * batch_logits = logits.data() + b * model_.config.codec_vocab_size;
-        int nan_count = 0;
-        int inf_count = 0;
-        for (int i = 0; i < model_.config.codec_vocab_size; ++i) {
-            if (std::isnan(batch_logits[i])) nan_count++;
-            if (std::isinf(batch_logits[i])) inf_count++;
-        }
-        if (nan_count > 0 || inf_count > 0) {
-            fprintf(stderr, "WARNING: Batch %d PREFILL LOGITS CONTAIN %d NaNs and %d Infs!\n", b, nan_count, inf_count);
-        }
-    }
-
-    auto sample_or_argmax = [&](float * logits_ptr, int32_t vocab_size, float temp, int32_t tk) -> int32_t {
-        if (temp <= 0.0f) {
-            return argmax(logits_ptr, vocab_size);
-        }
-        for (int32_t i = 0; i < vocab_size; ++i) logits_ptr[i] /= temp;
-        if (tk > 0 && tk < vocab_size) {
-            std::vector<std::pair<float, int32_t>> scored(vocab_size);
-            for (int32_t i = 0; i < vocab_size; ++i) scored[i] = {logits_ptr[i], i};
-            std::partial_sort(scored.begin(), scored.begin() + tk, scored.end(),
-                [](const std::pair<float, int32_t> & a, const std::pair<float, int32_t> & b) { return a.first > b.first; });
-            float threshold = scored[tk - 1].first;
-            for (int32_t i = 0; i < vocab_size; ++i) {
-                if (logits_ptr[i] < threshold) logits_ptr[i] = -INFINITY;
-            }
-        }
-        float max_logit = *std::max_element(logits_ptr, logits_ptr + vocab_size);
-        std::vector<float> probs(vocab_size);
-        double sum = 0.0;
-        for (int32_t i = 0; i < vocab_size; ++i) {
-            probs[i] = expf(logits_ptr[i] - max_logit);
-            sum += probs[i];
-        }
-        for (int32_t i = 0; i < vocab_size; ++i) probs[i] = (float)(probs[i] / sum);
-        std::discrete_distribution<int32_t> dist(probs.begin(), probs.begin() + vocab_size);
-        return dist(rng_);
-    };
-
     std::vector<bool> is_finished(batch_size, false);
     int32_t active_batches = batch_size;
-    const int32_t suppress_start = model_.config.codec_vocab_size - 1024;
     std::vector<std::unordered_set<int32_t>> generated_cb0_tokens(batch_size);
 
     std::vector<int32_t> codebook_0_tokens(batch_size);
     for (int b = 0; b < batch_size; ++b) {
-        float * batch_logits = logits.data() + b * model_.config.codec_vocab_size;
+        codebook_0_tokens[b] = logits[b];
         
-        for (int32_t i = suppress_start; i < model_.config.codec_vocab_size; ++i) {
-            if (i != model_.config.codec_eos_id) {
-                batch_logits[i] = -INFINITY;
-            }
-        }
-        if (repetition_penalty != 1.0f) {
-            for (int32_t tok : generated_cb0_tokens[b]) {
-                if (tok >= 0 && tok < model_.config.codec_vocab_size) {
-                    if (batch_logits[tok] > 0.0f) batch_logits[tok] /= repetition_penalty;
-                    else batch_logits[tok] *= repetition_penalty;
-                }
-            }
-        }
-        
-        codebook_0_tokens[b] = sample_or_argmax(batch_logits, model_.config.codec_vocab_size, temperature, top_k);
         if (codebook_0_tokens[b] == model_.config.codec_eos_id) {
             is_finished[b] = true;
             active_batches--;
@@ -3319,29 +3226,16 @@ bool TTSTransformer::generate_batch(const std::vector<std::vector<int32_t>> & in
             }
         }
 
-        if (!forward_step(step_embd_batch.data(), prefill_len + frame, batch_size, logits, nullptr)) {
+        unsigned int step_seed = rng_();
+        if (!forward_step(step_embd_batch.data(), prefill_len + frame, batch_size, logits, nullptr, temperature, top_k, step_seed)) {
             return false;
         }
 
         for (int b = 0; b < batch_size; ++b) {
             if (is_finished[b]) continue;
-            float * batch_logits = logits.data() + b * model_.config.codec_vocab_size;
             
-            for (int32_t i = suppress_start; i < model_.config.codec_vocab_size; ++i) {
-                if (i != model_.config.codec_eos_id) {
-                    batch_logits[i] = -INFINITY;
-                }
-            }
-            if (repetition_penalty != 1.0f) {
-                for (int32_t tok : generated_cb0_tokens[b]) {
-                    if (tok >= 0 && tok < model_.config.codec_vocab_size) {
-                        if (batch_logits[tok] > 0.0f) batch_logits[tok] /= repetition_penalty;
-                        else batch_logits[tok] *= repetition_penalty;
-                    }
-                }
-            }
+            codebook_0_tokens[b] = logits[b];
             
-            codebook_0_tokens[b] = sample_or_argmax(batch_logits, model_.config.codec_vocab_size, temperature, top_k);
             if (codebook_0_tokens[b] == model_.config.codec_eos_id) {
                 is_finished[b] = true;
                 active_batches--;
