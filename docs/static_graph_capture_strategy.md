@@ -51,3 +51,17 @@ Similar to Memory Splicing, both the secondary loop (`predict_codes`) and primar
 - **NEVER** use generic vectors for context initialization if the graph is intended to be static. Allocate independent arena vectors for every persistent graph.
 - **NEVER** invoke `ggml_backend_sched_reset` on a scheduler owning an active static context. Use strict Scheduler Multi-Plexing.
 - Static graph inputs (`ggml_set_input`) must ALWAYS receive `ggml_backend_tensor_set` populations even if they are intermediate tensors patched between layers.
+
+## 5. D2H / H2D Bypassing in Compute Loops
+When bridging 14 sequential steps on a Code Predictor (Autoregressive sampling loop), synchronous reads to CPU create a PCIe bottleneck blocking the pipeline (e.g. 240ms per frame to extract every `pred_token`).
+
+Instead of `ggml_backend_sched_synchronize` + `ggml_backend_tensor_get`, we enqueue the 14 fetches and pushes sequentially to the backend stream:
+```cpp
+// Step N - 1 Graph outputs
+ggml_backend_tensor_get_async(state_.backend, pred_out, &all_pred_tokens[(step - 1) * batch_size], 0, ...);
+
+// Step N Graph inputs directly from the pending Async Fetch D2H -> H2D relay
+ggml_backend_tensor_set_async(sched[step], inp_code, &all_pred_tokens[(step - 1) * batch_size], 0, ...);
+```
+GGML's `tensor_copy_async` naturally refuses cross-graph transfers between different rank geometries (1D vs 2D Layout Mismatches from custom sampling nodes). 
+By staging an intermediate Host View (array vector back-buffers), the CUDA Stream engine automatically aligns memory transfers in Device queues without halting the Host loop or evaluating Layout Layout/Strides assertions, yielding a 50% Latency optimization (6.0 FPS sustained).

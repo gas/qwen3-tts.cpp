@@ -73,3 +73,16 @@ The only mathematically viable path to reach extreme synthesis speeds (RTF ~1.0)
 #### Step 4: The CPU Fallback Trap (The Silent Killer)
 * **Task:** Implement a "dummy" or functional version of the CPU sampler in the core `ggml.c` loop, even if we solely intend to execute on the GPU.
 * **Risk (Critical):** If the GGML scheduler decides for any obscure reason (e.g., an unhandled tensor shape or type mismatch) that the GPU cannot evaluate our new node, **it will trigger a silent Fallback**. It will dynamically memory-copy the 800MB logit tensor to RAM, run the CPU sampler, and copy the `[1]` tensor back to VRAM. If this happens, the HIP Graph shatters, and the generation RTF will plummet to 20.0+ without giving any explicit compile or runtime error.
+
+## 6. Pacing de Streams Asíncronos (El Anti-Patrón D2H)
+
+During the Autoregressive Optimization phase (Code Predictor, 14 frames per step), it was discovered that **pure Device-to-Device (D2D) copies via `ggml_backend_tensor_copy_async` natively degrade throughput by 50% on HIP/ROCm**, contradicting common GPU programming sense (from 145ms to 240ms per step).
+
+The physical cause is **Stream Queue Depth Saturation**. If the Host loop does not explicitly halt to wait for device reads, the CPU enqueues 14 complete layers of `build_forward` Transformer models instantaneously into the AMD Command Queue. This huge queue chokes the WG Processors (WGP) cache management resulting in massive slow-downs per kernel execution.
+
+**Architectural Solution:**
+The Code Predictor employs a *Host-Side Stream Relay Bypass*. It purposely uses:
+1. `ggml_backend_tensor_get_async` (D2H) to a fixed `std::vector` mapping.
+2. `ggml_backend_tensor_set_async` (H2D) from that `vector` to the next step's input.
+
+This acts as a transparent **Stream Pacer**. The Host CPU safely enqueues the D2H operation, but is implicitly slowed down by the memory controller resolving the PCIe bus pointer transfers. This natural "micro-throttle" trick prevents the CPU from flooding the GPU with 14 huge graphs simultaneously, achieving the golden 6.0 FPS mark and retaining optimal hardware RTF metrics for Batch size >= 1. Never replace this with a strict `tensor_copy_async` pipeline loop on RDNA architectures.

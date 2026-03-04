@@ -2785,6 +2785,11 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
     auto t_steps_start = clk::now();
 #endif
     
+    std::vector<int32_t> prev_codes_async(batch_size);
+    std::vector<int32_t> positions_async_step(15 * batch_size);
+    std::vector<float> sampler_data_async_step(15 * 4);
+    std::vector<int32_t> all_pred_tokens(15 * batch_size);
+
     for (int step = 1; step < 15; ++step) {
         int32_t n_past = step + 1;
 
@@ -2812,10 +2817,6 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
         }
 
         struct ggml_cgraph * gf = state_.gf_code_pred_step_static[step];
-        
-        std::vector<int32_t> prev_codes_async;
-        std::vector<int32_t> positions_async_step;
-        float sampler_data_async_step[4];
 
 #ifdef QWEN3_TTS_TIMING
         t0 = clk::now();
@@ -2832,17 +2833,28 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
         
         struct ggml_tensor * inp_code = ggml_graph_get_tensor(gf, "inp_code");
         if (inp_code) {
-            prev_codes_async.resize(batch_size);
-            for (int b = 0; b < batch_size; ++b) {
-                prev_codes_async[b] = output[b][step - 1];
+            if (step == 1) {
+                // fprintf(stderr, "  [Step %d] Syncing first code from CPU->GPU\n", step);
+                for (int b = 0; b < batch_size; ++b) {
+                    prev_codes_async[b] = output[b][0];
+                }
+                ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_static[step], inp_code), inp_code, prev_codes_async.data(), 0, batch_size * sizeof(int32_t));
+            } else {
+                // Bypassing CUDA Events & Synchronizations inside GGML backend internals via Host-Side Memory Stream Relay.
+                // Since this step waits for step-1 on the same stream, we can issue an async get from prev_pred
+                // into a host buffer, and immediately issue an async set into this step's inp_code. Wait-free!
+                struct ggml_tensor * prev_pred = ggml_graph_get_tensor(state_.gf_code_pred_step_static[step - 1], "pred_token");
+                ggml_backend_tensor_get_async(state_.backend, prev_pred, &all_pred_tokens[(step - 1) * batch_size], 0, batch_size * sizeof(int32_t));
+                ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_static[step], inp_code), inp_code, &all_pred_tokens[(step - 1) * batch_size], 0, batch_size * sizeof(int32_t));
             }
-            ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_static[step], inp_code), inp_code, prev_codes_async.data(), 0, batch_size * sizeof(int32_t));
         }
         
         struct ggml_tensor * inp_pos = ggml_graph_get_tensor(gf, "inp_pos");
         if (inp_pos) {
-            positions_async_step.assign(batch_size, n_past);
-            ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_static[step], inp_pos), inp_pos, positions_async_step.data(), 0, batch_size * sizeof(int32_t));
+            for (int b = 0; b < batch_size; ++b) {
+                positions_async_step[step * batch_size + b] = n_past;
+            }
+            ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_static[step], inp_pos), inp_pos, &positions_async_step[step * batch_size], 0, batch_size * sizeof(int32_t));
         }
         
         struct ggml_tensor * inp_sampler_cfg = ggml_graph_get_tensor(gf, "inp_sampler_cfg");
@@ -2851,11 +2863,11 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
             int32_t top_k_val = top_k;
             uint32_t seed_val = seed + step;
             int32_t suppress_start = 1 << 30;
-            sampler_data_async_step[0] = temp_val;
-            std::memcpy(&sampler_data_async_step[1], &top_k_val, sizeof(float));
-            std::memcpy(&sampler_data_async_step[2], &seed_val, sizeof(float));
-            std::memcpy(&sampler_data_async_step[3], &suppress_start, sizeof(float));
-            ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_static[step], inp_sampler_cfg), inp_sampler_cfg, sampler_data_async_step, 0, 4 * sizeof(float));
+            sampler_data_async_step[step * 4 + 0] = temp_val;
+            std::memcpy(&sampler_data_async_step[step * 4 + 1], &top_k_val, sizeof(float));
+            std::memcpy(&sampler_data_async_step[step * 4 + 2], &seed_val, sizeof(float));
+            std::memcpy(&sampler_data_async_step[step * 4 + 3], &suppress_start, sizeof(float));
+            ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_static[step], inp_sampler_cfg), inp_sampler_cfg, &sampler_data_async_step[step * 4], 0, 4 * sizeof(float));
         }
 #ifdef QWEN3_TTS_TIMING
         t1 = clk::now();
@@ -2865,6 +2877,7 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
 #ifdef QWEN3_TTS_TIMING
         t0 = clk::now();
 #endif
+        // fprintf(stderr, "  [Step %d] Computing graph async\n", step);
         if (ggml_backend_sched_graph_compute_async(state_.code_pred_sched_static[step], gf) != GGML_STATUS_SUCCESS) {
             error_msg_ = "Failed to compute code predictor step graph asynchronously";
             ggml_backend_sched_reset(state_.code_pred_sched_static[step]);
@@ -2885,21 +2898,24 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
 #ifdef QWEN3_TTS_TIMING
         t0 = clk::now();
 #endif
-        std::vector<int32_t> pred_tokens(batch_size);
-        ggml_backend_tensor_get_async(state_.backend, pred_out, pred_tokens.data(), 0, batch_size * sizeof(int32_t));
+        // fprintf(stderr, "  [Step %d] Scheduling Readback tensor_get_async\n", step);
+        ggml_backend_tensor_get_async(state_.backend, pred_out, &all_pred_tokens[step * batch_size], 0, batch_size * sizeof(int32_t));
         
-        // Explicit sync to await readout since predictor runs locally
-        ggml_backend_sched_synchronize(state_.code_pred_sched_static[step]);
-        
-        for (int b = 0; b < batch_size; ++b) {
-            output[b][step] = pred_tokens[b];
-        }
-
 #ifdef QWEN3_TTS_TIMING
         t1 = clk::now();
         if (timing_) timing_->t_code_pred_data_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
         t0 = clk::now(); // Reset t0 for the start of the next step!
 #endif
+    }
+    
+    // fprintf(stderr, "  [Sync] Waiting for all 14 steps...\n");
+    ggml_backend_synchronize(state_.backend);
+    // fprintf(stderr, "  [Sync] Done!\n");
+    
+    for (int step = 1; step < 15; ++step) {
+        for (int b = 0; b < batch_size; ++b) {
+            output[b][step] = all_pred_tokens[step * batch_size + b];
+        }
     }
 #ifdef QWEN3_TTS_TIMING
     if (timing_) timing_->t_code_pred_steps_ms += std::chrono::duration<double, std::milli>(clk::now() - t_steps_start).count();
