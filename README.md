@@ -1,6 +1,7 @@
-# qwen3_tts.cpp: Changes on this branch exp/ggmlop
+# qwen3_tts.cpp: this branch exp/ggmlop
 
-Read the [Full implementation](./docs/static_graph_capture_strategy.md)
+Read the [custom ops architecture](./docs/custom_ops_architecture.md)
+Read the [static graph capture strategy](./docs/static_graph_capture_strategy.md)
 
 ## ggml
 rocm: add support for host-side stream relay via async D2H/H2D
