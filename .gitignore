@@ -14,6 +14,7 @@ models/coreml/
 .docs/
 .test/
 logs/
+.agents/
 
 # Reference outputs (generated)
 reference/*.bin
