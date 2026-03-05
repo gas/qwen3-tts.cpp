@@ -1,9 +1,16 @@
-# qwen3_tts.cpp: this branch exp/ggmlop
+# qwen3_tts.cpp: esta rama exp/mega-graph
+
+Nada por ahora.
+Leer el [plan de implementación](./docs/megagraph_implementation_plan.md)
+
+
+---
+# Rama anterior exp/ggmlop
 
 Read the [custom ops architecture](./docs/custom_ops_architecture.md)
 Read the [static graph capture strategy](./docs/static_graph_capture_strategy.md)
 
-# Qwen3-TTS In-Device Optimization
+Qwen3-TTS In-Device Optimization
 
 ## 1. El Conflicto Original del PCIe (Fase 1 a 23)
 Inicialmente, el predictor autorregresivo (Encargado de decodificar 14 frames acústicos iterativos por texto inferido) funcionaba re-inicializando los grafos GGML en *cada* paso. Recrear el grafo en CPU y enviarlo a la GPU con *ggml_backend_sched_alloc_graph* tomaba ~10ms extra por frame.
