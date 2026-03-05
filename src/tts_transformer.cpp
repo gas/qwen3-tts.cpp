@@ -37,15 +37,13 @@ void TTSTransformer::unload_model() {
     coreml_code_predictor_path_.clear();
     skip_ggml_code_pred_layers_ = false;
 
-    for (int i = 0; i < 15; i++) {
-        if (state_.code_pred_sched_static[i]) {
-            ggml_backend_sched_free(state_.code_pred_sched_static[i]);
-            state_.code_pred_sched_static[i] = nullptr;
-        }
-        if (state_.ctx_code_pred_static[i]) {
-            ggml_free(state_.ctx_code_pred_static[i]);
-            state_.ctx_code_pred_static[i] = nullptr;
-        }
+    if (state_.code_pred_sched_mega) {
+        ggml_backend_sched_free(state_.code_pred_sched_mega);
+        state_.code_pred_sched_mega = nullptr;
+    }
+    if (state_.ctx_code_pred_mega) {
+        ggml_free(state_.ctx_code_pred_mega);
+        state_.ctx_code_pred_mega = nullptr;
     }
 
     if (state_.sched) {
@@ -1903,7 +1901,7 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph(int32_t batch
     return gf;
 }
 
-struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(struct ggml_context * ctx0, int32_t n_past, int32_t generation_step, int32_t batch_size) {
+struct ggml_cgraph * TTSTransformer::build_code_pred_mega_graph(struct ggml_context * ctx0, int32_t batch_size) {
     const auto & cfg = model_.config;
     const int hidden_size = cfg.hidden_size;
     const int n_head = cfg.code_pred_n_attention_heads;
@@ -1914,37 +1912,35 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(struct ggml_cont
     const int n_layer = cfg.code_pred_layers;
     const int n_tokens = 1;
     
-    struct ggml_cgraph * gf = ggml_new_graph_custom(ctx0, QWEN3_TTS_MAX_NODES, false);
+    // We will allocate a massive graph
+    struct ggml_cgraph * gf = ggml_new_graph_custom(ctx0, QWEN3_TTS_MAX_NODES * 14, false);
     
-    struct ggml_tensor * inp_sampler_cfg = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 4);
-    ggml_set_name(inp_sampler_cfg, "inp_sampler_cfg");
-    ggml_set_input(inp_sampler_cfg);
+    // Global inputs for the first step
+    struct ggml_tensor * inp_code_step1 = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, batch_size);
+    ggml_set_name(inp_code_step1, "inp_code");
+    ggml_set_input(inp_code_step1);
+    
+    // Current token code running across iterations
+    struct ggml_tensor * current_code = inp_code_step1;
+    std::vector<struct ggml_tensor *> all_preds;
 
-    struct ggml_tensor * inp_hidden = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hidden_size, batch_size);
-    ggml_set_name(inp_hidden, "inp_hidden");
-    ggml_set_input(inp_hidden);
-    
-    struct ggml_tensor * inp_code = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, batch_size);
-    ggml_set_name(inp_code, "inp_code");
-    ggml_set_input(inp_code);
-    
-    struct ggml_tensor * inp_pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1 * batch_size);
-    ggml_set_name(inp_pos, "inp_pos");
-    ggml_set_input(inp_pos);
+    const float KQscale = 1.0f / sqrtf(float(head_dim));
 
-// `inp_embd` and `inp_head` are no longer inputs. They are strictly bound to the model weights.
-    
-    struct ggml_tensor * cur;
-    if (generation_step == 0) {
-        cur = ggml_reshape_3d(ctx0, inp_hidden, hidden_size, 1, batch_size);
-        if (model_.code_pred_proj_in) {
-            cur = ggml_mul_mat(ctx0, model_.code_pred_proj_in, cur);
-            if (model_.code_pred_proj_in_bias) {
-                cur = ggml_add(ctx0, cur, model_.code_pred_proj_in_bias);
-            }
-        }
-    } else {
-        cur = ggml_get_rows(ctx0, model_.code_pred_embd[generation_step - 1], inp_code);
+    for (int step = 1; step < 15; ++step) {
+        int32_t n_past = step + 1;
+        
+        // Sampler parameters for this step
+        struct ggml_tensor * inp_sampler_cfg = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 4);
+        ggml_set_name(inp_sampler_cfg, ("inp_sampler_cfg_" + std::to_string(step)).c_str());
+        ggml_set_input(inp_sampler_cfg);
+
+        // Position tensor for this step
+        struct ggml_tensor * inp_pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1 * batch_size);
+        ggml_set_name(inp_pos, ("inp_pos_" + std::to_string(step)).c_str());
+        ggml_set_input(inp_pos);
+
+        struct ggml_tensor * cur;
+        cur = ggml_get_rows(ctx0, model_.code_pred_embd[step - 1], current_code);
         cur = ggml_reshape_3d(ctx0, cur, hidden_size, 1, batch_size);
         if (model_.code_pred_proj_in) {
             cur = ggml_mul_mat(ctx0, model_.code_pred_proj_in, cur);
@@ -1952,130 +1948,133 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(struct ggml_cont
                 cur = ggml_add(ctx0, cur, model_.code_pred_proj_in_bias);
             }
         }
-    }
-    
-    // Now the dimension of cur is `code_pred_hidden_size`, let's rename it
-    struct ggml_tensor * inpL = cur;
-    
-    const float KQscale = 1.0f / sqrtf(float(head_dim));
-    
-    for (int il = 0; il < n_layer; ++il) {
-        const auto & layer = model_.code_pred_layers[il];
         
-        cur = ggml_rms_norm(ctx0, inpL, eps);
-        cur = ggml_mul(ctx0, cur, layer.attn_norm);
+        struct ggml_tensor * inpL = cur;
         
-        struct ggml_tensor * Qcur = ggml_mul_mat(ctx0, layer.attn_q, cur);
-        struct ggml_tensor * Kcur = ggml_mul_mat(ctx0, layer.attn_k, cur);
-        struct ggml_tensor * Vcur = ggml_mul_mat(ctx0, layer.attn_v, cur);
-        
-        Qcur = ggml_reshape_4d(ctx0, Qcur, head_dim, n_head, n_tokens, batch_size);
-        Kcur = ggml_reshape_4d(ctx0, Kcur, head_dim, n_kv_head, n_tokens, batch_size);
-        Vcur = ggml_reshape_4d(ctx0, Vcur, head_dim, n_kv_head, n_tokens, batch_size);
-        
-        if (layer.attn_q_norm) {
-            Qcur = ggml_rms_norm(ctx0, Qcur, eps);
-            Qcur = ggml_mul(ctx0, Qcur, layer.attn_q_norm);
+        for (int il = 0; il < n_layer; ++il) {
+            const auto & layer = model_.code_pred_layers[il];
+            
+            cur = ggml_rms_norm(ctx0, inpL, eps);
+            cur = ggml_mul(ctx0, cur, layer.attn_norm);
+            
+            struct ggml_tensor * Qcur = ggml_mul_mat(ctx0, layer.attn_q, cur);
+            struct ggml_tensor * Kcur = ggml_mul_mat(ctx0, layer.attn_k, cur);
+            struct ggml_tensor * Vcur = ggml_mul_mat(ctx0, layer.attn_v, cur);
+            
+            Qcur = ggml_reshape_4d(ctx0, Qcur, head_dim, n_head, n_tokens, batch_size);
+            Kcur = ggml_reshape_4d(ctx0, Kcur, head_dim, n_kv_head, n_tokens, batch_size);
+            Vcur = ggml_reshape_4d(ctx0, Vcur, head_dim, n_kv_head, n_tokens, batch_size);
+            
+            if (layer.attn_q_norm) {
+                Qcur = ggml_rms_norm(ctx0, Qcur, eps);
+                Qcur = ggml_mul(ctx0, Qcur, layer.attn_q_norm);
+            }
+            if (layer.attn_k_norm) {
+                Kcur = ggml_rms_norm(ctx0, Kcur, eps);
+                Kcur = ggml_mul(ctx0, Kcur, layer.attn_k_norm);
+            }
+            Qcur = ggml_reshape_3d(ctx0, Qcur, head_dim, n_head, n_tokens * batch_size);
+            Qcur = ggml_rope_ext(ctx0, Qcur, inp_pos, nullptr,
+                                 head_dim, GGML_ROPE_TYPE_NEOX, 0,
+                                 rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+            Qcur = ggml_reshape_4d(ctx0, Qcur, head_dim, n_head, n_tokens, batch_size);
+            
+            Kcur = ggml_reshape_3d(ctx0, Kcur, head_dim, n_kv_head, n_tokens * batch_size);
+            Kcur = ggml_rope_ext(ctx0, Kcur, inp_pos, nullptr,
+                                 head_dim, GGML_ROPE_TYPE_NEOX, 0,
+                                 rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+            Kcur = ggml_reshape_4d(ctx0, Kcur, head_dim, n_kv_head, n_tokens, batch_size);
+            
+            struct ggml_tensor * k_cache = state_.code_pred_cache.k_cache[il];
+            struct ggml_tensor * v_cache = state_.code_pred_cache.v_cache[il];
+
+            struct ggml_tensor * k_cache_view = ggml_view_4d(ctx0, k_cache,
+                head_dim, n_kv_head, n_tokens, batch_size,
+                k_cache->nb[1], k_cache->nb[2], k_cache->nb[3],
+                n_past * k_cache->nb[2]);
+            
+            struct ggml_tensor * v_cache_view = ggml_view_4d(ctx0, v_cache,
+                head_dim, n_kv_head, n_tokens, batch_size,
+                v_cache->nb[1], v_cache->nb[2], v_cache->nb[3],
+                n_past * v_cache->nb[2]);
+            
+            ggml_build_forward_expand(gf, ggml_cpy(ctx0, Kcur, k_cache_view));
+            ggml_build_forward_expand(gf, ggml_cpy(ctx0, Vcur, v_cache_view));
+            
+            int n_kv = n_past + n_tokens;
+            
+            struct ggml_tensor * K = ggml_view_4d(ctx0, k_cache,
+                head_dim, n_kv_head, n_kv, batch_size,
+                k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], 0);
+            
+            struct ggml_tensor * V = ggml_view_4d(ctx0, v_cache,
+                head_dim, n_kv_head, n_kv, batch_size,
+                v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], 0);
+            
+            struct ggml_tensor * Q = ggml_permute(ctx0, Qcur, 0, 2, 1, 3);
+            K = ggml_permute(ctx0, K, 0, 2, 1, 3);
+            V = ggml_permute(ctx0, V, 0, 2, 1, 3);
+            
+            struct ggml_tensor * KQ = ggml_mul_mat(ctx0, K, Q);
+            KQ = ggml_scale(ctx0, KQ, KQscale);
+            KQ = ggml_soft_max(ctx0, KQ);
+            
+            V = ggml_cont(ctx0, ggml_transpose(ctx0, V));
+            
+            struct ggml_tensor * KQV = ggml_mul_mat(ctx0, V, KQ);
+            KQV = ggml_permute(ctx0, KQV, 0, 2, 1, 3);
+            cur = ggml_cont_3d(ctx0, KQV, n_head * head_dim, n_tokens, batch_size);
+            
+            cur = ggml_mul_mat(ctx0, layer.attn_output, cur);
+            cur = ggml_add(ctx0, cur, inpL);
+            struct ggml_tensor * inpFF = cur;
+            
+            cur = ggml_rms_norm(ctx0, inpFF, eps);
+            cur = ggml_mul(ctx0, cur, layer.ffn_norm);
+            
+            struct ggml_tensor * gate = ggml_mul_mat(ctx0, layer.ffn_gate, cur);
+            struct ggml_tensor * up = ggml_mul_mat(ctx0, layer.ffn_up, cur);
+            
+            gate = ggml_silu(ctx0, gate);
+            
+            cur = ggml_mul(ctx0, gate, up);
+            
+            struct ggml_tensor * step_ffn_down_f32 = ggml_cast(ctx0, layer.ffn_down, GGML_TYPE_F32);
+            cur = ggml_mul_mat(ctx0, step_ffn_down_f32, cur);
+            
+            inpL = ggml_add(ctx0, cur, inpFF);
         }
         
-        if (layer.attn_k_norm) {
-            Kcur = ggml_rms_norm(ctx0, Kcur, eps);
-            Kcur = ggml_mul(ctx0, Kcur, layer.attn_k_norm);
-        }
-        Qcur = ggml_reshape_3d(ctx0, Qcur, head_dim, n_head, n_tokens * batch_size);
-        Qcur = ggml_rope_ext(ctx0, Qcur, inp_pos, nullptr,
-                             head_dim, GGML_ROPE_TYPE_NEOX, 0,
-                             rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-        Qcur = ggml_reshape_4d(ctx0, Qcur, head_dim, n_head, n_tokens, batch_size);
+        cur = inpL;
+        cur = ggml_rms_norm(ctx0, cur, eps);
+        cur = ggml_mul(ctx0, cur, model_.code_pred_output_norm);
         
-        Kcur = ggml_reshape_3d(ctx0, Kcur, head_dim, n_kv_head, n_tokens * batch_size);
-        Kcur = ggml_rope_ext(ctx0, Kcur, inp_pos, nullptr,
-                             head_dim, GGML_ROPE_TYPE_NEOX, 0,
-                             rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-        Kcur = ggml_reshape_4d(ctx0, Kcur, head_dim, n_kv_head, n_tokens, batch_size);
-        
-        struct ggml_tensor * k_cache = state_.code_pred_cache.k_cache[il];
-        struct ggml_tensor * v_cache = state_.code_pred_cache.v_cache[il];
+        struct ggml_tensor * logits = ggml_mul_mat(ctx0, model_.code_pred_head[step], cur);
+        logits = ggml_reshape_3d(ctx0, logits, model_.config.code_pred_vocab_size, n_tokens, batch_size);
+        ggml_set_name(logits, ("logits_" + std::to_string(step)).c_str());
+        ggml_set_output(logits);
+        ggml_build_forward_expand(gf, logits);
 
-        int batch_size = k_cache->ne[3];
-
-        struct ggml_tensor * k_cache_view = ggml_view_4d(ctx0, k_cache,
-            head_dim, n_kv_head, n_tokens, batch_size,
-            k_cache->nb[1], k_cache->nb[2], k_cache->nb[3],
-            n_past * k_cache->nb[2]);
+        struct ggml_tensor * pred = ggml_autoregressive_sample(ctx0, logits, inp_sampler_cfg);
+        ggml_set_name(pred, ("pred_token_" + std::to_string(step)).c_str());
+        ggml_set_output(pred);
+        ggml_build_forward_expand(gf, pred);
         
-        struct ggml_tensor * v_cache_view = ggml_view_4d(ctx0, v_cache,
-            head_dim, n_kv_head, n_tokens, batch_size,
-            v_cache->nb[1], v_cache->nb[2], v_cache->nb[3],
-            n_past * v_cache->nb[2]);
-        
-        ggml_build_forward_expand(gf, ggml_cpy(ctx0, Kcur, k_cache_view));
-        ggml_build_forward_expand(gf, ggml_cpy(ctx0, Vcur, v_cache_view));
-        
-        int n_kv = n_past + n_tokens;
-        
-        struct ggml_tensor * K = ggml_view_4d(ctx0, k_cache,
-            head_dim, n_kv_head, n_kv, batch_size,
-            k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], 0);
-        
-        struct ggml_tensor * V = ggml_view_4d(ctx0, v_cache,
-            head_dim, n_kv_head, n_kv, batch_size,
-            v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], 0);
-        
-        struct ggml_tensor * Q = ggml_permute(ctx0, Qcur, 0, 2, 1, 3);
-        K = ggml_permute(ctx0, K, 0, 2, 1, 3);
-        V = ggml_permute(ctx0, V, 0, 2, 1, 3);
-        
-        struct ggml_tensor * KQ = ggml_mul_mat(ctx0, K, Q);
-        KQ = ggml_scale(ctx0, KQ, KQscale);
-        // Causal mask unnecessary because length of K is precisely n_past + 1, mapping purely to past/current keys.
-        KQ = ggml_soft_max(ctx0, KQ);
-        
-        V = ggml_cont(ctx0, ggml_transpose(ctx0, V));
-        
-        struct ggml_tensor * KQV = ggml_mul_mat(ctx0, V, KQ);
-        KQV = ggml_permute(ctx0, KQV, 0, 2, 1, 3);
-        cur = ggml_cont_3d(ctx0, KQV, n_head * head_dim, n_tokens, batch_size);
-        
-        cur = ggml_mul_mat(ctx0, layer.attn_output, cur);
-        cur = ggml_add(ctx0, cur, inpL);
-        struct ggml_tensor * inpFF = cur;
-        
-        cur = ggml_rms_norm(ctx0, inpFF, eps);
-        cur = ggml_mul(ctx0, cur, layer.ffn_norm);
-        
-        struct ggml_tensor * gate = ggml_mul_mat(ctx0, layer.ffn_gate, cur);
-        struct ggml_tensor * up = ggml_mul_mat(ctx0, layer.ffn_up, cur);
-        
-        gate = ggml_silu(ctx0, gate);
-        
-        cur = ggml_mul(ctx0, gate, up);
-        
-        struct ggml_tensor * step_ffn_down_f32 = ggml_cast(ctx0, layer.ffn_down, GGML_TYPE_F32);
-        cur = ggml_mul_mat(ctx0, step_ffn_down_f32, cur);
-        
-        inpL = ggml_add(ctx0, cur, inpFF);
+        current_code = pred; // Connect output of step N to input of step N+1
+        all_preds.push_back(pred);
     }
     
-     cur = inpL;
-     
-     cur = ggml_rms_norm(ctx0, cur, eps);
-     cur = ggml_mul(ctx0, cur, model_.code_pred_output_norm);
-     
-     struct ggml_tensor * logits = ggml_mul_mat(ctx0, model_.code_pred_head[generation_step], cur);
-     logits = ggml_reshape_3d(ctx0, logits, model_.config.code_pred_vocab_size, n_tokens, batch_size);
-     ggml_set_name(logits, "logits");
-     ggml_set_output(logits);
-     ggml_build_forward_expand(gf, logits);
+    // Concat all 14 predictions into a single [14, batch_size] output tensor so we only tensor_get once
+    struct ggml_tensor * final_out = all_preds[0];
+    for (int i = 1; i < 14; i++) {
+        final_out = ggml_concat(ctx0, final_out, all_preds[i], 0); // concat along sequence dimension? pred_token is 1D [batch_size]. Actually concat along dim 0 means shape becomes [batch_size * 14] or [batch_size, 14]?
+        // wait, ggml_concat along dim 0 will interleave batches? No, if it's 1D [batch_size], concat along 0 makes it [batch_size * 2].
+        // Concat along 1 would make it [batch_size, 2]. Wait, pred is 1D. Let's just reshape them to 2D [1, batch_size] and concat along 0.
+    }
+    
+    // Wait, let's just retrieve them by name individually using ggml_graph_get_tensor later,
+    // to avoid dimension mismatch. Just returning gf is fine!
 
-     // Reemplazo del Custom Map por Primera Clase: GPU Sampler
-     
-     struct ggml_tensor * pred = ggml_autoregressive_sample(ctx0, logits, inp_sampler_cfg);
-
-     
-     ggml_set_name(pred, "pred_token");
-     ggml_set_output(pred);
-     ggml_build_forward_expand(gf, pred);
     
     return gf;
 }
@@ -2785,144 +2784,87 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden_batch, in
     auto t_steps_start = clk::now();
 #endif
     
-    std::vector<int32_t> prev_codes_async(batch_size);
-    std::vector<int32_t> positions_async_step(15 * batch_size);
-    std::vector<float> sampler_data_async_step(15 * 4);
     std::vector<int32_t> all_pred_tokens(15 * batch_size);
 
+    if (state_.ctx_code_pred_mega == nullptr) {
+        size_t graph_max_nodes = QWEN3_TTS_MAX_NODES * 14;
+        struct ggml_init_params params = {
+            /*.mem_size   =*/ ggml_tensor_overhead() * graph_max_nodes + ggml_graph_overhead_custom(graph_max_nodes, false),
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ true,
+        };
+        state_.ctx_code_pred_mega = ggml_init(params);
+
+        ggml_backend_t backends[] = {state_.backend, state_.backend_cpu};
+        state_.code_pred_sched_mega = ggml_backend_sched_new(
+            backends, nullptr, 2, graph_max_nodes, false, true);
+
+        struct ggml_cgraph * gf_mega = build_code_pred_mega_graph(state_.ctx_code_pred_mega, batch_size);
+        
+        if (!ggml_backend_sched_alloc_graph(state_.code_pred_sched_mega, gf_mega)) {
+            error_msg_ = "Failed to allocate code predictor mega graph";
+            return false;
+        }
+        state_.gf_code_pred_mega = gf_mega;
+    }
+
+    struct ggml_cgraph * gf = state_.gf_code_pred_mega;
+
+#ifdef QWEN3_TTS_TIMING
+    t0 = clk::now();
+#endif
+
+    struct ggml_tensor * inp_code = ggml_graph_get_tensor(gf, "inp_code");
+    if (inp_code) {
+        std::vector<int32_t> initial_codes_for_mega(batch_size);
+        for (int b = 0; b < batch_size; ++b) {
+            initial_codes_for_mega[b] = output[b][0]; // output[b][0] contains codebook_1 predicted by prefill!
+        }
+        ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_mega, inp_code), inp_code, initial_codes_for_mega.data(), 0, batch_size * sizeof(int32_t));
+    }
+
     for (int step = 1; step < 15; ++step) {
-        int32_t n_past = step + 1;
-
-        if (state_.ctx_code_pred_static[step] == nullptr) {
-            struct ggml_init_params params = {
-                /*.mem_size   =*/ ggml_tensor_overhead() * QWEN3_TTS_MAX_NODES,
-                /*.mem_buffer =*/ NULL,
-                /*.no_alloc   =*/ true,
-            };
-            state_.compute_meta_code_pred[step].resize(params.mem_size);
-            params.mem_buffer = state_.compute_meta_code_pred[step].data();
-            state_.ctx_code_pred_static[step] = ggml_init(params);
-
-            ggml_backend_t backends[] = {state_.backend, state_.backend_cpu};
-            state_.code_pred_sched_static[step] = ggml_backend_sched_new(
-                backends, nullptr, 2, QWEN3_TTS_MAX_NODES, false, true);
-
-            struct ggml_cgraph * gf_step = build_code_pred_step_graph(state_.ctx_code_pred_static[step], n_past, step, batch_size);
-            
-            if (!ggml_backend_sched_alloc_graph(state_.code_pred_sched_static[step], gf_step)) {
-                error_msg_ = "Failed to allocate code predictor step graph for step " + std::to_string(step);
-                return false;
-            }
-            state_.gf_code_pred_step_static[step] = gf_step;
-        }
-
-        struct ggml_cgraph * gf = state_.gf_code_pred_step_static[step];
-
-#ifdef QWEN3_TTS_TIMING
-        t0 = clk::now();
-#endif
-
-#ifdef QWEN3_TTS_TIMING
-        t0 = clk::now();
-#endif
-
-        struct ggml_tensor * inp_hidden = ggml_graph_get_tensor(gf, "inp_hidden");
-        if (inp_hidden) {
-            ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_static[step], inp_hidden), inp_hidden, hidden_batch, 0, cfg.hidden_size * batch_size * sizeof(float));
-        }
-        
-        struct ggml_tensor * inp_code = ggml_graph_get_tensor(gf, "inp_code");
-        if (inp_code) {
-            if (step == 1) {
-                // fprintf(stderr, "  [Step %d] Syncing first code from CPU->GPU\n", step);
-                for (int b = 0; b < batch_size; ++b) {
-                    prev_codes_async[b] = output[b][0];
-                }
-                ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_static[step], inp_code), inp_code, prev_codes_async.data(), 0, batch_size * sizeof(int32_t));
-            } else {
-                // Bypassing CUDA Events & Synchronizations inside GGML backend internals via Host-Side Memory Stream Relay.
-                // Since this step waits for step-1 on the same stream, we can issue an async get from prev_pred
-                // into a host buffer, and immediately issue an async set into this step's inp_code. Wait-free!
-                struct ggml_tensor * prev_pred = ggml_graph_get_tensor(state_.gf_code_pred_step_static[step - 1], "pred_token");
-                ggml_backend_tensor_get_async(state_.backend, prev_pred, &all_pred_tokens[(step - 1) * batch_size], 0, batch_size * sizeof(int32_t));
-                ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_static[step], inp_code), inp_code, &all_pred_tokens[(step - 1) * batch_size], 0, batch_size * sizeof(int32_t));
-            }
-        }
-        
-        struct ggml_tensor * inp_pos = ggml_graph_get_tensor(gf, "inp_pos");
-        if (inp_pos) {
-            for (int b = 0; b < batch_size; ++b) {
-                positions_async_step[step * batch_size + b] = n_past;
-            }
-            ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_static[step], inp_pos), inp_pos, &positions_async_step[step * batch_size], 0, batch_size * sizeof(int32_t));
-        }
-        
-        struct ggml_tensor * inp_sampler_cfg = ggml_graph_get_tensor(gf, "inp_sampler_cfg");
+        struct ggml_tensor * inp_sampler_cfg = ggml_graph_get_tensor(gf, ("inp_sampler_cfg_" + std::to_string(step)).c_str());
         if (inp_sampler_cfg) {
-            float temp_val = temperature;
-            int32_t top_k_val = top_k;
-            uint32_t seed_val = seed + step;
-            int32_t suppress_start = 1 << 30;
-            sampler_data_async_step[step * 4 + 0] = temp_val;
-            std::memcpy(&sampler_data_async_step[step * 4 + 1], &top_k_val, sizeof(float));
-            std::memcpy(&sampler_data_async_step[step * 4 + 2], &seed_val, sizeof(float));
-            std::memcpy(&sampler_data_async_step[step * 4 + 3], &suppress_start, sizeof(float));
-            ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_static[step], inp_sampler_cfg), inp_sampler_cfg, &sampler_data_async_step[step * 4], 0, 4 * sizeof(float));
-        }
-#ifdef QWEN3_TTS_TIMING
-        t1 = clk::now();
-        if (timing_) timing_->t_code_pred_data_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
-#endif
-
-#ifdef QWEN3_TTS_TIMING
-        t0 = clk::now();
-#endif
-        // fprintf(stderr, "  [Step %d] Computing graph async\n", step);
-        if (ggml_backend_sched_graph_compute_async(state_.code_pred_sched_static[step], gf) != GGML_STATUS_SUCCESS) {
-            error_msg_ = "Failed to compute code predictor step graph asynchronously";
-            ggml_backend_sched_reset(state_.code_pred_sched_static[step]);
-            return false;
-        }
-#ifdef QWEN3_TTS_TIMING
-        t1 = clk::now();
-        if (timing_) timing_->t_code_pred_compute_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
-#endif
-        
-        struct ggml_tensor * pred_out = ggml_graph_get_tensor(gf, "pred_token");
-        if (!pred_out) {
-            error_msg_ = "Failed to find pred_token tensor step";
-            ggml_backend_sched_reset(state_.code_pred_sched_static[step]);
-            return false;
+            float cfg_vals[] = {temperature, (float)top_k, 1.0f, (float)(seed + step)};
+            ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_mega, inp_sampler_cfg), inp_sampler_cfg, cfg_vals, 0, 4 * sizeof(float));
         }
 
-#ifdef QWEN3_TTS_TIMING
-        t0 = clk::now();
-#endif
-        // fprintf(stderr, "  [Step %d] Scheduling Readback tensor_get_async\n", step);
-        ggml_backend_tensor_get_async(state_.backend, pred_out, &all_pred_tokens[step * batch_size], 0, batch_size * sizeof(int32_t));
-        
-#ifdef QWEN3_TTS_TIMING
-        t1 = clk::now();
-        if (timing_) timing_->t_code_pred_data_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
-        t0 = clk::now(); // Reset t0 for the start of the next step!
-#endif
+        struct ggml_tensor * inp_pos = ggml_graph_get_tensor(gf, ("inp_pos_" + std::to_string(step)).c_str());
+        if (inp_pos) {
+            std::vector<int32_t> pos_vals(batch_size, step + 1);
+            ggml_backend_tensor_set_async(ggml_backend_sched_get_tensor_backend(state_.code_pred_sched_mega, inp_pos), inp_pos, pos_vals.data(), 0, batch_size * sizeof(int32_t));
+        }
+    }
+
+    if (ggml_backend_sched_graph_compute_async(state_.code_pred_sched_mega, gf) != GGML_STATUS_SUCCESS) {
+        error_msg_ = "Failed to compute code predictor mega graph asynchronously";
+        ggml_backend_sched_reset(state_.code_pred_sched_mega);
+        return false;
     }
     
-    // fprintf(stderr, "  [Sync] Waiting for all 14 steps...\n");
+    for (int step = 1; step < 15; ++step) {
+        struct ggml_tensor * pred_out = ggml_graph_get_tensor(gf, ("pred_token_" + std::to_string(step)).c_str());
+        if (pred_out) {
+            ggml_backend_tensor_get_async(state_.backend, pred_out, &all_pred_tokens[step * batch_size], 0, batch_size * sizeof(int32_t));
+        }
+    }
+    
     ggml_backend_synchronize(state_.backend);
-    // fprintf(stderr, "  [Sync] Done!\n");
     
     for (int step = 1; step < 15; ++step) {
         for (int b = 0; b < batch_size; ++b) {
             output[b][step] = all_pred_tokens[step * batch_size + b];
         }
     }
+
 #ifdef QWEN3_TTS_TIMING
     if (timing_) timing_->t_code_pred_steps_ms += std::chrono::duration<double, std::milli>(clk::now() - t_steps_start).count();
 #endif
     
     return true;
 }
+
 
 bool TTSTransformer::generate(const int32_t * instruct_tokens, int32_t n_instruct_tokens,
                                const int32_t * text_tokens, int32_t n_tokens,

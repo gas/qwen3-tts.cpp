@@ -195,11 +195,10 @@ struct tts_transformer_state {
     tts_kv_cache cache;           // Talker KV cache (28 layers)
     tts_kv_cache code_pred_cache; // Code predictor KV cache (5 layers)
 
-    // Persistent static graph state for code predictor
-    std::vector<uint8_t> compute_meta_code_pred[15];
-    struct ggml_context * ctx_code_pred_static[15] = {nullptr};
-    struct ggml_cgraph * gf_code_pred_step_static[15] = {nullptr};
-    ggml_backend_sched_t code_pred_sched_static[15] = {nullptr};
+    std::vector<uint8_t> compute_meta_code_pred_mega;
+    struct ggml_context * ctx_code_pred_mega = nullptr;
+    struct ggml_cgraph * gf_code_pred_mega = nullptr;
+    ggml_backend_sched_t code_pred_sched_mega = nullptr;
 };
 
 // TTS Transformer class
@@ -343,10 +342,8 @@ private:
     // Build computation graph for code predictor
     struct ggml_cgraph * build_code_pred_graph(int32_t n_prev_codes);
     
-    // Build computation graph for single-step autoregressive code predictor
-    // n_past: number of tokens already in KV cache (0-14)
-    // generation_step: which codebook we're predicting (0-14)
-    struct ggml_cgraph * build_code_pred_step_graph(struct ggml_context * ctx0, int32_t n_past, int32_t generation_step, int32_t batch_size = 1);
+    // Build computation graph for 14-step autoregressive code predictor mega-graph
+    struct ggml_cgraph * build_code_pred_mega_graph(struct ggml_context * ctx0, int32_t batch_size);
     
     // Build computation graph for 2-token prefill of code predictor
     // Processes [past_hidden, codec_embd(codebook_0_token)] together
